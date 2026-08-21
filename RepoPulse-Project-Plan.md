@@ -255,6 +255,10 @@ Her faz bir GitHub Milestone'dur. Her madde ayrı bir GitHub Issue olarak açıl
 
 **RP-002 (Android OAuth callback deep-link altyapısı, Faz 0 `#4`'ün karşılığı) — durum: TAMAMLANDI.** Kapsam: `repopulse://oauth/callback` için dar (wildcard'sız) intent-filter, platformdan bağımsız `RepoPulse.Core` class library'sinde (namespace `RepoPulse.Core.Authentication`) yaşayan bağımsız query parser/model, cold-start ve warm-start callback yakalama, tüket-ve-temizle (consume-once) semantiğine sahip bir broker, geliştirme amaçlı 3 durumlu durum ekranı. Gerçek OAuth isteği, PKCE üretimi, token exchange, SecureStorage ve GitHub OAuth App'i bu kapsamın dışında bırakıldı — sıradaki issue'ların konusu. `Pixel_6_API36` emülatöründe adb ile cold-start/warm-start/geçersiz-callback/eski-callback-tekrar-gösterilmemesi senaryolarının dördü de doğrulandı; kod/state/error_description hiçbir logda veya ekranda ham olarak görünmüyor. `main`'e push sonrası GitHub Actions yeşil geçti.
 
+**RP-003 (GitHub OAuth Authorization Code + PKCE giriş prototipi) — durum: TAMAMLANDI.** Authorization, PKCE ve state doğrulandı; token exchange backend gereksinimi nedeniyle devam ediyor. Kapsam: merkezi OAuth yapılandırması (public Client ID, endpoint sabitleri), RFC 7636 uyumlu `PkceGenerator` (bilinen test vektörüyle doğrulandı), bellekte tek-aktif/süreli/tek-kullanımlık `AuthorizationSessionStore` (state sabit-zamanlı karşılaştırma ile), `GitHubAuthorizationUrlBuilder`, MAUI ekranına "GitHub ile giriş yap" butonu, `GitHubOAuthClient` (token exchange + `GET /user`, DI'lı `HttpClient`, ek NuGet paketi yok). 40/40 unit test geçti. **Gerçek Pixel_6_API36 emülatöründe, kullanıcının kendi GitHub hesabıyla** uçtan uca doğrulandı: authorize URL → gerçek GitHub giriş/onay ekranı → gerçek `code`+`state` ile callback (`outcome=Success`) → state doğrulaması başarılı. **Token exchange adımı GitHub tarafından `incorrect_client_credentials` ile reddedildi** — GitHub'ın klasik OAuth App tipi, PKCE parametrelerini authorize adımında kabul etse de token adımında hâlâ `client_secret` istiyor (kod hatası değil, GitHub platform kısıtlaması). Karar ve gerekçe: [`docs/adr/003-github-oauth-token-exchange.md`](docs/adr/003-github-oauth-token-exchange.md) (ADR-003, Accepted) — minimal bir ASP.NET Core token-exchange backend'i ile devam edilmesine karar verildi. Bu çalışma `codex/oauth-pkce-backend` feature branch'inde (`main`'e push edilmedi).
+
+**RP-004 (minimal ASP.NET Core token-exchange backend) — durum: BAŞLANMADI.** Kapsam (ADR-003'te belirlendi, henüz kodlanmadı): `client_secret`'ı yalnızca sunucu tarafında tutan, mobil uygulamadan `code`+`code_verifier` alıp GitHub'a iletip dönen `access_token`'ı olduğu gibi geri veren stateless bir proxy endpoint'i. Faz 0'ın PKCE çıkış kriteri ve Faz 1 `#8` bu backend tamamlanmadan tam olarak karşılanamaz (aşağıda not edildi). Not: bu, mevcut Faz issue numaralandırmasına (`#1`–`#28`) eklenmiş yeni bir numaralı issue değildir — RP-00X etiketleri gibi ayrı bir takip kaydıdır; **mevcut `#1`–`#28` numaraları sessizce değiştirilmedi.**
+
 ### Faz 0 — Tasarım ve doğrulama
 
 Issue'lar:
@@ -266,7 +270,7 @@ Issue'lar:
 
 **Çıkış kriterleri (Milestone: Faz 0)**
 - [ ] Beş ekranın wireframe'i repoda veya tasarım linkinde erişilebilir durumda
-- [ ] PKCE + custom URI callback prototipi gerçek bir Android cihaz/emülatörde uçtan uca çalışıyor: GitHub onayından sonra uygulama access token'ı alıyor ve bunu ekranda/log'da gösterebiliyor
+- [ ] PKCE + custom URI callback prototipi gerçek bir Android cihaz/emülatörde uçtan uca çalışıyor: GitHub onayından sonra uygulama access token'ı alıyor ve bunu ekranda/log'da gösterebiliyor — **kısmen karşılandı (RP-003):** authorize + callback + state doğrulaması gerçek cihazda çalışıyor, ancak token exchange GitHub'ın `client_secret` gereksinimi nedeniyle backend olmadan tamamlanamıyor (bkz. ADR-003). Bu kriter RP-004 (token-exchange backend) tamamlanınca kapatılabilir.
 - [ ] `docs/health-score.md` taslağı commit edilmiş, beş alt puan için ağırlık ve en az üç eşik örneği tablo halinde yazılmış
 - [ ] En az 5 farklı gerçek repodan alınmış örnek API response'u `tests/fixtures/` altında mevcut
 
@@ -275,7 +279,7 @@ Issue'lar:
 Issue'lar:
 - `#6` `src/` altında katmanlı proje iskeletini oluştur (Mobile / Application / Domain / Infrastructure), `RepoPulse.slnx`'e ekle
 - `#7` AppShell navigasyon akışı: Giriş → Repository Listesi → Repository Detayı → Ayarlar
-- `#8` PKCE + custom URI callback akışını uygulamaya entegre et, token'ı SecureStorage'a yaz
+- `#8` PKCE + custom URI callback akışını uygulamaya entegre et, token'ı SecureStorage'a yaz — **RP-004 (token-exchange backend) tamamlanmadan bu issue gerçek bir access token üretemez; sıralama RP-004 → `#8` şeklindedir**
 - `#9` Typed HttpClient/Refit ile GitHub API istemcisi (repo listesi + repo detay uç noktaları)
 - `#10` SQLite şeması ve yerel önbellek repository'si (repo listesi + detay için)
 - `#11` Repository listesi ekranı: arama, sıralama, favorilere ekleme
