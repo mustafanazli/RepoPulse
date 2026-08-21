@@ -26,10 +26,18 @@
 
             <Button
                 x:Name="CounterBtn"
-                Text="Click me" 
+                Text="Click me"
                 SemanticProperties.Hint="Counts the number of times you click"
                 Clicked="OnCounterClicked"
                 HorizontalOptions="Fill" />
+
+            <!-- RP-002 dev-only OAuth callback verification widget; no sensitive values shown -->
+            <Label
+                Text="OAuth Callback (dev)"
+                Style="{StaticResource SubHeadline}" />
+            <Label
+                x:Name="OAuthCallbackStatusLabel"
+                Text="Henüz callback alınmadı" />
         </VerticalStackLayout>
     </ScrollView>
 
