@@ -1,0 +1,54 @@
+# Build results
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+[Aa][Rr][Mm]/
+[Aa][Rr][Mm]64/
+bld/
+[Ll]og/
+[Ll]ogs/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.userprefs
+
+# .NET
+*.nupkg
+*.snupkg
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# MAUI / mobile build outputs
+*.apk
+*.aab
+*.ipa
+*.appx
+*.appxbundle
+*.msix
+
+# Rider / VS Code
+.idea/
+.vscode/
+*.DotSettings.user
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Test results
+[Tt]est[Rr]esult*/
+*.trx
+*.coverage
+*.coveragexml
+
+# User-specific secrets (never commit tokens/keys)
+*.secrets.json
+appsettings.*.local.json

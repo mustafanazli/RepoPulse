@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/tests/">
+    <Project Path="tests/RepoPulse.UnitTests/RepoPulse.UnitTests.csproj" />
+  </Folder>
+  <Project Path="RepoPulse/RepoPulse.csproj" />
+</Solution>

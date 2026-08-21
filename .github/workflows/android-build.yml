@@ -1,0 +1,43 @@
+name: Android build & unit tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Install MAUI Android workload
+        run: dotnet workload install android
+
+      - name: Restore
+        run: dotnet restore RepoPulse.slnx
+
+      # On Linux the RepoPulse.csproj conditional TargetFrameworks resolve to
+      # net10.0-android only (iOS/MacCatalyst/Windows heads are excluded),
+      # so a plain solution build here compiles the Android app + unit tests.
+      - name: Build
+        run: dotnet build RepoPulse.slnx -c Release --no-restore
+
+      - name: Run unit tests
+        run: dotnet test tests/RepoPulse.UnitTests/RepoPulse.UnitTests.csproj -c Release --no-build --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-test-results
+          path: tests/RepoPulse.UnitTests/TestResults/test-results.trx
+          if-no-files-found: warn
