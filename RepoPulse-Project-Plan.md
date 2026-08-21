@@ -251,7 +251,7 @@ ViewModel
 
 Her faz bir GitHub Milestone'dur. Her madde ayrı bir GitHub Issue olarak açılır; issue numaraları ilk issue'lar açıldığında güncellenir (aşağıdaki `#N` değerleri planlama sırasıdır, gerçek issue numaralarıyla eşleşmeyebilir). Bir faz, yalnızca o fazın **çıkış kriterleri** karşılandığında tamamlanmış sayılır.
 
-**RP-001 (proje iskeleti ve CI temeli) — durum: yerel olarak tamamlandı, CI doğrulaması ilk push sonrası bekleniyor.** Kapsam: mevcut VS MAUI projesinin korunması, `.gitignore`, `tests/RepoPulse.UnitTests` (placeholder altyapı testi), `.github/workflows/android-build.yml`. Yerelde `dotnet build`/`dotnet test` doğrulandı; workflow'un GitHub Actions üzerinde gerçekten yeşil geçtiği henüz doğrulanmadı (repo'ya hiç push yapılmadı).
+**RP-001 (proje iskeleti ve CI temeli) — durum: TAMAMLANDI.** Kapsam: mevcut VS MAUI projesinin korunması, `.gitignore`, `tests/RepoPulse.UnitTests` (placeholder altyapı testi), `.github/workflows/android-build.yml`. Yerelde `dotnet build`/`dotnet test` doğrulandı; `main` branch'e push edildikten sonra GitHub Actions üzerinde `dotnet workload restore` → `dotnet restore` → `dotnet build` → `dotnet test` adımlarının tamamı yeşil geçti (repo: `mustafanazli/RepoPulse`). CI'ın ilk denemesinde `dotnet workload install android` yetersiz kaldığı için (`maui-android` workload'u eksikti) `dotnet workload restore RepoPulse.slnx` ile değiştirildi; bu düzeltmeyle birlikte doğrulandı.
 
 ### Faz 0 — Tasarım ve doğrulama
 
