@@ -1,58 +1,92 @@
-# RepoPulse.AuthApi — token exchange endpoint kontratı
+# RepoPulse.AuthApi — token exchange endpoint
 
-> Bu doküman RP-004 kapsamında **tasarım** amaçlıdır. `/oauth/github/exchange` endpoint'i henüz uygulanmadı — yalnızca `GET /health` mevcuttur. Bkz. [ADR-003](adr/003-github-oauth-token-exchange.md) için bu backend'in neden gerekli olduğu.
+> `POST /oauth/github/exchange` **uygulandı** ve yalnızca sahte `HttpMessageHandler`'larla test edildi (48/48 test geçiyor). Gerçek `client_secret` hiç oluşturulmadı/kullanılmadı, mobil uygulama bu endpoint'e henüz bağlanmadı, gerçek GitHub ağına hiçbir testte çıkılmadı. Bkz. [ADR-003](adr/003-github-oauth-token-exchange.md) için bu backend'in neden gerekli olduğu.
 
 ## Neden bir backend?
 
 GitHub'ın klasik OAuth App tipi, authorize adımında PKCE parametrelerini (`code_challenge`, `code_challenge_method`) kabul etse de, token exchange adımında hâlâ `client_secret` istiyor. Mobil bir uygulamaya gömülen hiçbir değer gerçekten gizli kalamaz, bu yüzden `client_secret` yalnızca güvenilir bir sunucu ortamında tutulmalı. Bu backend'in tek görevi: `client_secret`'ı hiç bilmeyen mobil istemci ile onu ihtiyaç duyan GitHub token endpoint'i arasında ince, stateless bir aracı olmak.
 
-## Planlanan endpoint
+## Endpoint
 
 ```
 POST /oauth/github/exchange
+Content-Type: application/json
 ```
 
-### Mobil istemciden alınacaklar (request body)
+### Request body
 
-| Alan | Açıklama |
+```json
+{
+  "code": "...",
+  "codeVerifier": "..."
+}
+```
+
+| Alan | Kural |
 |---|---|
-| `code` | GitHub'ın callback'te döndürdüğü authorization code (tek kullanımlık) |
-| `codeVerifier` | Mobil istemcinin authorize isteğinde ürettiği PKCE `code_verifier` |
+| `code` | Boş olamaz, en fazla 512 karakter |
+| `codeVerifier` | RFC 7636: 43–128 karakter, yalnızca `A-Z a-z 0-9 - . _ ~` |
 
-### Mobil istemciden ASLA alınmayacaklar
+Değerler trim edilmez; kurallara uymuyorsa `400 invalid_request` döner. **Bilinmeyen JSON alanı reddedilir** (`JsonSerializerOptions.UnmappedMemberHandling = Disallow`) — `clientId`, `clientSecret`, `redirectUri`, `tokenEndpoint` gibi alanlar request body'de zaten tanımlı değil; gönderilirse istek tamamen reddedilir, sessizce yok sayılmaz.
 
-Aşağıdaki değerler istemciden **kabul edilmemeli** — backend'in kendi güvenilir configuration'ından (`GitHubOAuthOptions`) okunmalı:
+### Mobil istemciden ASLA alınmayanlar
 
-| Alan | Neden istemciden alınmaz |
-|---|---|
-| `clientSecret` | Mobil istemci bunu hiçbir zaman bilmemeli/taşımamalı |
-| `redirectUri` | Sabit olmalı; istemcinin gönderdiği bir değer kabul edilirse redirect_uri değiştirme saldırılarına kapı açılır |
-| `clientId` | Public olsa da, backend'in kendi yapılandırdığı OAuth App ile tutarlılık için istemciden değil configuration'dan gelmeli |
-| `tokenEndpoint` | İstemcinin backend'e "hangi URL'e istek at" demesine izin vermek, backend'i keyfi bir SSRF proxy'sine dönüştürür |
+| Alan | Neden istemciden alınmaz | Nereden gelir |
+|---|---|---|
+| `clientSecret` | Mobil istemci bunu hiçbir zaman bilmemeli/taşımamalı | `GitHubOAuthOptions` (user-secrets / env var) |
+| `redirectUri` | Sabit olmalı; aksi halde redirect_uri değiştirme saldırısına kapı açılır | `GitHubOAuthOptions` (appsettings.json, sabit) |
+| `clientId` | Public olsa da backend'in kendi OAuth App'iyle tutarlı olmalı | `GitHubOAuthOptions` (appsettings.json) |
+| `tokenEndpoint` | İstemcinin "hangi URL'e istek at" demesine izin vermek backend'i SSRF proxy'sine çevirir | `GitHubOAuthOptions` (appsettings.json, sabit) |
 
-Bu ayrım kasıtlı: istemci yalnızca *o anki yetkilendirmeye özgü, tek kullanımlık* değerleri (`code`, `codeVerifier`) gönderir; *sabit, uygulamaya özgü* değerler her zaman backend'in kontrolündedir.
+`GitHubOAuthOptionsValidator`, `RedirectUri`/`TokenEndpoint`'i yalnızca "geçerli bir URI mi" diye değil, **tam olarak beklenen değere eşit mi** diye kontrol eder (scheme/host/path/query normalize edilip karşılaştırılır — farklı host/path/query kabul edilmez). Configuration bu değerlerden saparsa host `ValidateOnStart()` ile hiç başlamaz.
 
-### Planlanan davranış
+### GitHub'a giden form alanları
 
-1. `code` ve `codeVerifier` doğrulanır (boş/eksik → `400 Bad Request`, gerçek OAuth değerleri log'a yazılmaz).
-2. Backend, kendi `GitHubOAuthOptions`'ından `client_id`, `client_secret`, `redirect_uri`'yi ekleyerek GitHub'ın token endpoint'ine `POST` yapar.
-3. GitHub'ın yanıtı ayrıştırılır; başarılıysa yalnızca `access_token`/`token_type`/`scope` mobil istemciye döndürülür.
-4. Backend, aldığı token'ı **saklamaz** (stateless proxy) — RP-004 kapsamında kalıcılık yok.
+`client_id`, `client_secret`, `code`, `redirect_uri`, `code_verifier` — ilk ikisi ve `redirect_uri` her zaman backend configuration'ından, `code`/`code_verifier` yalnızca request'ten. `Accept: application/json`, `User-Agent: RepoPulse-AuthApi`. Tek istek, otomatik retry yok (authorization code tek kullanımlık). `HttpClient` DI üzerinden (`AddHttpClient<IGitHubTokenExchangeService, GitHubTokenExchangeService>`), 10 saniye timeout, gelen `CancellationToken` ile birlikte.
 
-## Operasyonel gereksinimler (RP-004 uygulaması bunları karşılamalı)
+### Başarılı response (200)
 
-- **HTTPS zorunluluğu**: Endpoint yalnızca HTTPS üzerinden sunulmalı; HTTP isteği reddedilmeli veya yönlendirilmeli. Gerçek `code`/`codeVerifier` düz metin HTTP üzerinden asla taşınmamalı.
-- **Rate limiting**: Endpoint, aynı istemciden/IP'den kısa sürede çok sayıda isteğe karşı sınırlanmalı — token exchange brute-force denemelerine karşı.
-- **Maksimum request boyutu**: İstek gövdesi küçük ve sabit boyutlu olmalı (yalnızca iki kısa string alanı); aşırı büyük request body'ler erken reddedilmeli.
-- **Timeout**: GitHub'a yapılan giden istek için makul bir timeout (ör. 10-15 saniye) olmalı; GitHub yanıt vermezse istemciye zaman aşımı hatası dönmeli, istek asılı kalmamalı.
-- **Hassas veri redaction**: `code`, `codeVerifier`, `client_secret`, `access_token` hiçbir log satırında, hata mesajında veya telemetri olayında ham olarak görünmemeli — RP-002/RP-003'te mobil tarafta uygulanan aynı disiplin.
-- **Sabit redirect URI**: `redirect_uri` her zaman backend'in configuration'ından gelen sabit `repopulse://oauth/callback` değeri olmalı, hiçbir zaman istekten alınmamalı.
-- **GitHub hata cevaplarının doğrudan kullanıcıya aktarılmaması**: GitHub'ın döndürdüğü `error`/`error_description` ham haliyle istemciye iletilmemeli; RP-003'teki mobil `GitHubOAuthClient` deseninde olduğu gibi, yalnızca genel/güvenli bir hata sınıflandırması (ör. `oauth_error`, `network_error`) döndürülmeli.
+```json
+{
+  "accessToken": "...",
+  "tokenType": "bearer",
+  "scope": "...",
+  "expiresIn": 28800,
+  "refreshToken": "...",
+  "refreshTokenExpiresIn": 15811200
+}
+```
 
-## Kapsam dışı (RP-004'ün ilerleyen alt görevleri)
+`expiresIn`/`refreshToken`/`refreshTokenExpiresIn` GitHub OAuth App'in "Expire user access tokens" ayarına göre gelmeyebilir — model bunları nullable tutar, eksikse `null` döner, hata oluşmaz.
 
-- Gerçek GitHub'a HTTP isteği
-- Access/refresh token modeli ve döndürülmesi
-- Mobil uygulamanın bu backend'e bağlanması
+Her yanıt (başarılı veya başarısız) `Cache-Control: no-store` ve `Pragma: no-cache` header'larıyla döner — token hiçbir ara katmanda önbelleğe alınmamalı.
+
+### Hata sözleşmesi
+
+| Durum | HTTP | `title` |
+|---|---|---|
+| Geçersiz request (eksik/uzun `code`, geçersiz `codeVerifier`, bilinmeyen alan, bozuk JSON) | 400 | `invalid_request` |
+| GitHub OAuth reddi (`error` alanlı yanıt) | 400 | `oauth_exchange_failed` |
+| GitHub beklenmeyen/bozuk cevap (JSON parse hatası, `access_token` yok, `error` yok) | 502 | `upstream_error` |
+| GitHub'a giden istek zaman aşımına uğradı | 504 | `upstream_timeout` |
+| Rate limit aşıldı | 429 | `rate_limited` |
+| Beklenmeyen dahili hata | 500 | `internal_error` |
+
+Tüm hata gövdeleri `{"type":"about:blank","title":"...","status":...}` biçiminde — GitHub'ın ham `error`/`error_description`'ı, exception mesajı veya stack trace **hiçbir zaman** istemciye iletilmez (`GitHubTokenExchangeService` bunu GitHub'dan aldığı anda genel bir `FailureKind`'a indirger; `app.UseExceptionHandler` tüm işlenmemiş exception'ları da aynı şekilde genel `internal_error`'a indirger).
+
+## Koruma katmanları (uygulandı)
+
+- **Rate limiting**: ASP.NET Core'un yerleşik `Microsoft.AspNetCore.RateLimiting`'i, IP başına sabit pencere (10 istek/dakika, `QueueLimit=0`). Yalnızca `/oauth/github/exchange`'e uygulanır; `/health` rate-limit dışında. 429 gövdesi token/code bilgisi içermez.
+- **Request boyutu**: `/oauth/github/exchange` için 4096 bayt sabit üst sınır, uygulama seviyesinde middleware ile (Kestrel'in kendi limitine ek olarak — TestServer'da da çalışır).
+- **Timeout**: GitHub'a giden istek için 10 saniye `HttpClient.Timeout` + gelen `CancellationToken`.
+- **HTTPS**: `app.UseHttpsRedirection()` her ortamda; `app.UseHsts()` yalnızca Production'da.
+- **Forwarded headers**: **Bilinçli olarak eklenmedi.** Hosting/reverse-proxy topolojisi netleşmeden `X-Forwarded-*` header'larına güvenmek sahte IP/scheme bildirimine izin verebilir (ör. rate limiter'ın IP partition anahtarı yanıltılabilir). Güvenli varsayılan: hiçbir forwarded header'a güvenme.
+- **Hassas veri redaction**: `code`/`codeVerifier`/`client_secret`/`access_token`/`refresh_token` hiçbir log satırında görünmüyor — `LogSafetyTests` bunu ayırt edici sahte değerlerle doğruluyor.
+
+## Kapsam dışı (sonraki alt görevler)
+
+- Gerçek `client_secret` oluşturma/kullanma
+- Mobil uygulamanın bu backend'e bağlanması (RP-005+)
 - Hosting/deployment, Docker
-- Kalıcı depolama (bu backend zaten stateless olacak)
+- Kalıcı depolama (backend stateless kalmaya devam ediyor)
+- Gerçek GitHub ağına karşı uçtan uca doğrulama (yalnızca sahte handler'larla test edildi)
