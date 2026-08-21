@@ -253,6 +253,8 @@ Her faz bir GitHub Milestone'dur. Her madde ayrı bir GitHub Issue olarak açıl
 
 **RP-001 (proje iskeleti ve CI temeli) — durum: TAMAMLANDI.** Kapsam: mevcut VS MAUI projesinin korunması, `.gitignore`, `tests/RepoPulse.UnitTests` (placeholder altyapı testi), `.github/workflows/android-build.yml`. Yerelde `dotnet build`/`dotnet test` doğrulandı; `main` branch'e push edildikten sonra GitHub Actions üzerinde `dotnet workload restore` → `dotnet restore` → `dotnet build` → `dotnet test` adımlarının tamamı yeşil geçti (repo: `mustafanazli/RepoPulse`). CI'ın ilk denemesinde `dotnet workload install android` yetersiz kaldığı için (`maui-android` workload'u eksikti) `dotnet workload restore RepoPulse.slnx` ile değiştirildi; bu düzeltmeyle birlikte doğrulandı.
 
+**RP-002 (Android OAuth callback deep-link altyapısı, Faz 0 `#4`'ün karşılığı) — durum: TAMAMLANDI.** Kapsam: `repopulse://oauth/callback` için dar (wildcard'sız) intent-filter, platformdan bağımsız `RepoPulse.Core` class library'sinde (namespace `RepoPulse.Core.Authentication`) yaşayan bağımsız query parser/model, cold-start ve warm-start callback yakalama, tüket-ve-temizle (consume-once) semantiğine sahip bir broker, geliştirme amaçlı 3 durumlu durum ekranı. Gerçek OAuth isteği, PKCE üretimi, token exchange, SecureStorage ve GitHub OAuth App'i bu kapsamın dışında bırakıldı — sıradaki issue'ların konusu. `Pixel_6_API36` emülatöründe adb ile cold-start/warm-start/geçersiz-callback/eski-callback-tekrar-gösterilmemesi senaryolarının dördü de doğrulandı; kod/state/error_description hiçbir logda veya ekranda ham olarak görünmüyor. `main`'e push sonrası GitHub Actions yeşil geçti.
+
 ### Faz 0 — Tasarım ve doğrulama
 
 Issue'lar:
