@@ -83,10 +83,26 @@ Tüm hata gövdeleri `{"type":"about:blank","title":"...","status":...}` biçimi
 - **Forwarded headers**: **Bilinçli olarak eklenmedi.** Hosting/reverse-proxy topolojisi netleşmeden `X-Forwarded-*` header'larına güvenmek sahte IP/scheme bildirimine izin verebilir (ör. rate limiter'ın IP partition anahtarı yanıltılabilir). Güvenli varsayılan: hiçbir forwarded header'a güvenme.
 - **Hassas veri redaction**: `code`/`codeVerifier`/`client_secret`/`access_token`/`refresh_token` hiçbir log satırında görünmüyor — `LogSafetyTests` bunu ayırt edici sahte değerlerle doğruluyor.
 
+## Mobil client akışı (RP-005)
+
+Mobil taraf artık **iki ayrı, tek sorumluluklu client**'a bölündü (eski birleşik `GitHubOAuthClient` kaldırıldı):
+
+- **`RepoPulseAuthApiClient`** (`RepoPulse.Core.Authentication`) — yalnızca `POST /oauth/github/exchange`'i bilir. `client_id`/`client_secret`/`redirect_uri`/`state`/`tokenEndpoint` hiçbirini göndermez; yalnızca `{"code":"...","codeVerifier":"..."}` gönderir. Backend'in base adresi DI'da sabit (`RepoPulseAuthApiOptions.DevelopmentBaseAddress = "https://localhost:7082"`, **yalnızca geliştirme** — production hosting adresi ayrı bir görev).
+- **`GitHubApiClient`** (`RepoPulse.Core.Authentication`) — yalnızca `GET https://api.github.com/user`'ı bilir, OAuth/PKCE hakkında hiçbir şey bilmez, sadece zaten elde edilmiş bir access token alır.
+
+Mobil uygulama artık `https://github.com/login/oauth/access_token`'ı **hiçbir yerde** doğrudan çağırmıyor — `OAuthConstants.TokenEndpoint` sabiti tamamen kaldırıldı.
+
+`MainPage` akışı: callback alınır → `AuthorizationSessionStore.TryConsume` ile state doğrulanır → `RepoPulseAuthApiClient.ExchangeAsync` ile backend'den token alınır → `GitHubApiClient.GetCurrentUserAsync` ile kullanıcı bilgisi çekilir → login/avatar gösterilir. PKCE/session/tek-kullanımlık-state davranışları (RP-003) değişmedi.
+
+Backend'in `title` alanlı hata sözleşmesi (`invalid_request`/`oauth_exchange_failed`/`upstream_error`/`upstream_timeout`/`rate_limited`/`internal_error`), `RepoPulseAuthApiClient` içinde `AuthApiExchangeFailureKind` enum'una eşleniyor; `MainPage` bu enum'u kısa, güvenli Türkçe mesajlara çeviriyor — backend'in ham response body'si veya bir exception mesajı hiçbir zaman kullanıcıya gösterilmiyor.
+
+**Token'ların bellek davranışı**: `accessToken`/`refreshToken`, `MainPage` üzerinde yalnızca özel (private) alanlarda, yalnızca bellekte tutuluyor. SecureStorage/SQLite/Preferences/dosya kullanılmıyor — uygulama kapanınca kayboluyor, bu RP-005 kapsamında kabul edilebilir. Refresh akışı henüz uygulanmadı.
+
 ## Kapsam dışı (sonraki alt görevler)
 
-- Gerçek `client_secret` oluşturma/kullanma
-- Mobil uygulamanın bu backend'e bağlanması (RP-005+)
+- Gerçek backend'e karşı gerçek mobil↔backend entegrasyon testi (emülatörde)
+- Gerçek `client_secret` ile uçtan uca doğrulama
+- SecureStorage ile kalıcı oturum
+- Refresh token yenileme akışı
 - Hosting/deployment, Docker
-- Kalıcı depolama (backend stateless kalmaya devam ediyor)
 - Gerçek GitHub ağına karşı uçtan uca doğrulama (yalnızca sahte handler'larla test edildi)

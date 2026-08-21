@@ -11,7 +11,9 @@ public static class OAuthConstants
     // is a PKCE public client and has no client secret (see RP-003 report).
     public const string GitHubClientId = "Ov23likVt8K7YO1aqnfo";
 
+    // No token endpoint here on purpose: the mobile app never calls GitHub's
+    // token endpoint directly (see ADR-003 / RP-005) — RepoPulseAuthApiClient
+    // talks to our own backend instead, which holds the client_secret.
     public const string AuthorizeEndpoint = "https://github.com/login/oauth/authorize";
-    public const string TokenEndpoint = "https://github.com/login/oauth/access_token";
     public const string UserEndpoint = "https://api.github.com/user";
 }

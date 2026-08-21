@@ -8,17 +8,25 @@ namespace RepoPulse
         private static readonly TimeSpan SessionLifetime = TimeSpan.FromMinutes(5);
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
 
-        private readonly GitHubOAuthClient oauthClient;
+        private readonly IRepoPulseAuthApiClient authApiClient;
+        private readonly IGitHubApiClient gitHubApiClient;
         private readonly AuthorizationSessionStore sessionStore;
 
         int count = 0;
         bool isSubscribedToOAuthCallbacks;
         bool isSignInInProgress;
 
-        public MainPage(GitHubOAuthClient oauthClient, AuthorizationSessionStore sessionStore)
+        // In-memory only, by design (RP-005) — never SecureStorage/SQLite/
+        // Preferences/file. Lost on app restart; that is acceptable for now.
+        // Not used for anything yet (no refresh flow implemented).
+        private string? currentAccessToken;
+        private string? currentRefreshToken;
+
+        public MainPage(IRepoPulseAuthApiClient authApiClient, IGitHubApiClient gitHubApiClient, AuthorizationSessionStore sessionStore)
         {
             InitializeComponent();
-            this.oauthClient = oauthClient;
+            this.authApiClient = authApiClient;
+            this.gitHubApiClient = gitHubApiClient;
             this.sessionStore = sessionStore;
         }
 
@@ -140,15 +148,18 @@ namespace RepoPulse
 
             using var cts = new CancellationTokenSource(RequestTimeout);
 
-            var tokenResult = await oauthClient.ExchangeCodeForTokenAsync(result.Code!, session.CodeVerifier, cts.Token);
-            if (!tokenResult.IsSuccess || tokenResult.Success is null)
+            var exchangeResult = await authApiClient.ExchangeAsync(result.Code!, session.CodeVerifier, cts.Token);
+            if (!exchangeResult.IsSuccess || exchangeResult.Success is null)
             {
-                SetStatus($"Giriş başarısız: {tokenResult.SafeErrorMessage}");
+                SetStatus(DescribeExchangeFailure(exchangeResult.FailureKind));
                 EndSignInAttempt();
                 return;
             }
 
-            var userResult = await oauthClient.GetCurrentUserAsync(tokenResult.Success.AccessToken, cts.Token);
+            currentAccessToken = exchangeResult.Success.AccessToken;
+            currentRefreshToken = exchangeResult.Success.RefreshToken;
+
+            var userResult = await gitHubApiClient.GetCurrentUserAsync(currentAccessToken, cts.Token);
             if (!userResult.IsSuccess || userResult.User is null)
             {
                 SetStatus($"Giriş başarısız: {userResult.SafeErrorMessage}");
@@ -160,6 +171,23 @@ namespace RepoPulse
             SetSignedInUi(userResult.User);
             EndSignInAttempt();
         }
+
+        // Maps the backend's error contract (docs/backend-auth.md) to a short,
+        // safe Turkish message — never the raw backend response body or an
+        // exception message.
+        private static string DescribeExchangeFailure(AuthApiExchangeFailureKind kind) => kind switch
+        {
+            AuthApiExchangeFailureKind.InvalidRequest => "Giriş isteği geçersiz.",
+            AuthApiExchangeFailureKind.OAuthExchangeFailed => "GitHub yetkilendirmeyi reddetti.",
+            AuthApiExchangeFailureKind.UpstreamError => "GitHub şu anda yanıt vermiyor.",
+            AuthApiExchangeFailureKind.UpstreamTimeout => "GitHub'a bağlanırken zaman aşımı oluştu.",
+            AuthApiExchangeFailureKind.RateLimited => "Çok fazla deneme yapıldı, biraz sonra tekrar deneyin.",
+            AuthApiExchangeFailureKind.InternalError => "Sunucuda beklenmeyen bir hata oluştu.",
+            AuthApiExchangeFailureKind.NetworkError => "Sunucuya ulaşılamadı.",
+            AuthApiExchangeFailureKind.Timeout => "İstek zaman aşımına uğradı.",
+            AuthApiExchangeFailureKind.MalformedResponse => "Sunucudan geçersiz bir yanıt alındı.",
+            _ => "Giriş başarısız oldu."
+        };
 
         private void EndSignInAttempt()
         {
