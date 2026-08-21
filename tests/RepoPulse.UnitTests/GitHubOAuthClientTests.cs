@@ -11,13 +11,13 @@ public class GitHubOAuthClientTests
     public async Task ExchangeCodeForTokenAsync_SuccessResponse_ReturnsAccessToken()
     {
         var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK,
-            """{"access_token":"gho_faketoken123","token_type":"bearer","scope":""}"""));
+            """{"access_token":"test-access-token","token_type":"bearer","scope":""}"""));
         var client = new GitHubOAuthClient(new HttpClient(handler));
 
         var result = await client.ExchangeCodeForTokenAsync("some-code", "some-verifier", CancellationToken.None);
 
         Assert.True(result.IsSuccess);
-        Assert.Equal("gho_faketoken123", result.Success!.AccessToken);
+        Assert.Equal("test-access-token", result.Success!.AccessToken);
         Assert.Equal("bearer", result.Success.TokenType);
     }
 
@@ -25,7 +25,7 @@ public class GitHubOAuthClientTests
     public async Task ExchangeCodeForTokenAsync_DoesNotSendClientSecret()
     {
         var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK,
-            """{"access_token":"gho_faketoken123","token_type":"bearer"}"""));
+            """{"access_token":"test-access-token","token_type":"bearer"}"""));
         var client = new GitHubOAuthClient(new HttpClient(handler));
 
         await client.ExchangeCodeForTokenAsync("some-code", "some-verifier", CancellationToken.None);
@@ -112,7 +112,7 @@ public class GitHubOAuthClientTests
             """{"login":"octocat","avatar_url":"https://example.com/avatar.png"}"""));
         var client = new GitHubOAuthClient(new HttpClient(handler));
 
-        var result = await client.GetCurrentUserAsync("gho_faketoken123", CancellationToken.None);
+        var result = await client.GetCurrentUserAsync("test-access-token", CancellationToken.None);
 
         Assert.True(result.IsSuccess);
         Assert.Equal("octocat", result.User!.Login);
@@ -125,11 +125,11 @@ public class GitHubOAuthClientTests
         var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, """{"login":"octocat"}"""));
         var client = new GitHubOAuthClient(new HttpClient(handler));
 
-        await client.GetCurrentUserAsync("gho_faketoken123", CancellationToken.None);
+        await client.GetCurrentUserAsync("test-access-token", CancellationToken.None);
 
         var request = handler.LastRequest!;
         Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
-        Assert.Equal("gho_faketoken123", request.Headers.Authorization.Parameter);
+        Assert.Equal("test-access-token", request.Headers.Authorization.Parameter);
         Assert.Equal("RepoPulse", request.Headers.UserAgent.ToString());
         Assert.Equal("2022-11-28", request.Headers.GetValues("X-GitHub-Api-Version").Single());
     }
@@ -143,10 +143,10 @@ public class GitHubOAuthClientTests
         });
         var client = new GitHubOAuthClient(new HttpClient(handler));
 
-        var result = await client.GetCurrentUserAsync("gho_faketoken123", CancellationToken.None);
+        var result = await client.GetCurrentUserAsync("test-access-token", CancellationToken.None);
 
         Assert.False(result.IsSuccess);
-        Assert.DoesNotContain("gho_faketoken123", result.SafeErrorMessage);
+        Assert.DoesNotContain("test-access-token", result.SafeErrorMessage);
     }
 
     [Fact]
@@ -158,7 +158,7 @@ public class GitHubOAuthClientTests
         });
         var client = new GitHubOAuthClient(new HttpClient(handler));
 
-        var result = await client.GetCurrentUserAsync("gho_faketoken123", CancellationToken.None);
+        var result = await client.GetCurrentUserAsync("test-access-token", CancellationToken.None);
 
         Assert.False(result.IsSuccess);
     }
