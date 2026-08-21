@@ -19,8 +19,8 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      - name: Install MAUI Android workload
-        run: dotnet workload install android
+      - name: Restore MAUI workloads
+        run: dotnet workload restore RepoPulse.slnx
 
       - name: Restore
         run: dotnet restore RepoPulse.slnx
