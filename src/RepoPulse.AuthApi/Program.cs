@@ -24,6 +24,12 @@ builder.Services
 
 builder.Services.AddSingleton<IValidateOptions<GitHubOAuthOptions>, GitHubOAuthOptionsValidator>();
 
+// Server-side only — bound once at startup from configuration, never from
+// any request. See HostingOptions.cs and docs/adr/004-production-hosting.md.
+builder.Services
+    .AddOptions<HostingOptions>()
+    .Bind(builder.Configuration.GetSection(HostingOptions.SectionName));
+
 builder.Services.ConfigureHttpJsonOptions(jsonOptions =>
 {
     // Unknown fields (e.g. an attacker-supplied "clientSecret" or
@@ -43,6 +49,13 @@ builder.Services.AddRateLimiter(rateLimiterOptions =>
 
     // Partitioned per client IP: a fixed window keeps this simple and
     // sufficient for an MVP-scale backend without adding a new dependency.
+    //
+    // KNOWN LIMITATION behind Azure Container Apps (or any reverse proxy):
+    // Connection.RemoteIpAddress is the immediate TCP peer, which behind a
+    // proxy is the proxy's own address, not the original client's. No
+    // ForwardedHeaders handling has been added to fix this (see
+    // docs/adr/004-production-hosting.md for why, and why this is tracked
+    // as an open risk to verify in staging rather than treated as solved).
     rateLimiterOptions.AddPolicy(RateLimiterPolicyName, httpContext =>
         RateLimitPartition.GetFixedWindowLimiter(
             partitionKey: httpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
@@ -81,11 +94,26 @@ if (app.Environment.IsProduction())
     app.UseHsts();
 }
 
-app.UseHttpsRedirection();
+var hostingOptions = app.Services.GetRequiredService<IOptions<HostingOptions>>().Value;
+
+if (!hostingOptions.BehindTlsTerminatingProxy)
+{
+    // Unchanged local/dev + non-proxied-production behavior: this app
+    // terminates the HTTP->HTTPS redirect itself.
+    app.UseHttpsRedirection();
+}
+
+// else: Hosting:BehindTlsTerminatingProxy=true means a TLS-terminating
+// reverse proxy (Azure Container Apps ingress) already enforced HTTPS
+// before this request arrived over plain HTTP. Redirecting here would
+// create an infinite redirect loop, since every request Kestrel sees in
+// that topology looks like plain HTTP.
 
 // Deliberately no app.UseForwardedHeaders(...): trusting X-Forwarded-* headers
 // is only safe once the actual reverse proxy topology is known. Until a
-// hosting decision is made, the safe default is to trust nothing.
+// hosting decision is made, the safe default is to trust nothing — see the
+// rate limiter partition-key comment above and docs/adr/004-production-hosting.md
+// for the known consequence of this choice.
 
 app.UseRateLimiter();
 

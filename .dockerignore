@@ -1,0 +1,44 @@
+# Version control / editor / IDE state — irrelevant to the AuthApi image
+# and no reason to ever enter the Docker build context.
+.git
+.github
+.vs
+.vscode
+.idea
+.claude
+
+# Build outputs — rebuilt from source inside the multi-stage build.
+**/bin
+**/obj
+
+# MAUI mobile build artifacts — this Dockerfile only builds
+# src/RepoPulse.AuthApi, never the mobile app.
+*.apk
+*.aab
+*.ipa
+*.appx
+*.appxbundle
+*.msix
+
+# Test projects and results — not part of the runtime image.
+tests
+**/TestResults
+*.trx
+*.coverage
+*.coveragexml
+
+# Secrets and certificates — must never enter the Docker build context,
+# let alone the image. The real GitHubOAuth ClientSecret is supplied to the
+# container at runtime via an Azure Key Vault-backed Container Apps secret
+# reference (see docs/adr/004-production-hosting.md), never baked in here.
+**/secrets.json
+*.secrets.json
+appsettings.*.local.json
+**/*.pfx
+**/*.pem
+**/*.key
+**/*.crt
+
+# Docs / repo-level markdown — not needed to build or run the container.
+docs
+*.md
