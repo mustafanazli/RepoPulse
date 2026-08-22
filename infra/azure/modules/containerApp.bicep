@@ -7,8 +7,10 @@ param containerAppName string
 @description('Resource ID of the Container Apps managed environment this app runs in.')
 param containerAppsEnvironmentId string
 
-@description('Full container image reference for RepoPulse.AuthApi, pinned to an immutable commit SHA tag (e.g. ghcr.io/mustafanazli/repopulse-authapi:<40-char-sha>). Must NEVER be "latest" — a mutable tag would let a future, unreviewed image silently replace what staging is running.')
-param containerImage string
+@description('SHA-256 digest of the RepoPulse.AuthApi image already built and pushed to GHCR, in the exact format "sha256:<64 lowercase hex characters>". Obtain this from the real GHCR push output (the digest GHCR/`docker push` reports, or a registry API digest lookup) after the image has actually been pushed — never fabricate or guess this value. This parameter accepts ONLY a digest, never a tag: neither "latest" nor any mutable branch/commit tag can be expressed here at all, because the repository is fixed below and addressed exclusively by @<digest>.')
+@minLength(71)
+@maxLength(71)
+param containerImageDigest string
 
 @description('Public GitHub OAuth App Client ID — not a secret, already committed in src/RepoPulse.AuthApi/appsettings.json.')
 param gitHubOAuthClientId string = 'Ov23likVt8K7YO1aqnfo'
@@ -29,6 +31,13 @@ var maxReplicas = 1
 var cpuCores = json('0.25')
 var memorySize = '0.5Gi'
 var containerTargetPort = 8080
+
+// Repository is fixed and NOT parameterized — this template only ever
+// pulls RepoPulse.AuthApi from this single GHCR repository, addressed
+// exclusively by immutable digest (never a mutable tag such as "latest" or
+// a branch/commit tag). See docs/deployment/azure-staging-runbook.md §4.
+var containerImageRepository = 'ghcr.io/mustafanazli/repopulse-authapi'
+var containerImage = '${containerImageRepository}@${containerImageDigest}'
 
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: containerAppName

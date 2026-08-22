@@ -22,8 +22,12 @@ param tenantId = '<AZURE_TENANT_ID>'
 // or per-resource-group) — pick something unique to you, 3-24 characters.
 param keyVaultName = '<UNIQUE_KEY_VAULT_NAME>'
 
-// Must be an immutable commit SHA tag that has actually been built and
-// pushed to GHCR (see .github/workflows/authapi-container-build.yml for
-// the build-only CI check; pushing to GHCR itself is a separate, not-yet-
-// implemented step). Never "latest".
-param containerImage = 'ghcr.io/mustafanazli/repopulse-authapi:<IMMUTABLE_COMMIT_SHA>'
+// Must be the real SHA-256 digest GHCR reports after the RepoPulse.AuthApi
+// image has actually been built and pushed there (see
+// .github/workflows/authapi-container-build.yml for the build-only CI
+// check; pushing to GHCR itself is a separate, not-yet-implemented step).
+// Format: "sha256:<64 lowercase hex characters>" — this is a DIGEST, not a
+// tag, and "latest" cannot be expressed here at all. The GHCR repository
+// itself (ghcr.io/mustafanazli/repopulse-authapi) is fixed inside
+// modules/containerApp.bicep and is not set via a parameter.
+param containerImageDigest = '<GHCR_IMAGE_DIGEST_SHA256_HEX>'

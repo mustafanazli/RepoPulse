@@ -33,8 +33,10 @@
   kabul etmeyin.
 - **Azure Container Registry ve Log Analytics workspace bu mimaride bilinçli olarak
   oluşturulmuyor** — ikisi de sürekli (idle'dayken bile) ücret doğurabilir; bunun yerine
-  public GHCR image'ı ve workspace-less bir Container Apps environment kullanılıyor. Bu
-  kararı ADR-004'te tekrar okuyun; "biraz daha görünürlük için" ACR veya Log Analytics
+  public GHCR image'ı ve loglaması **açıkça kapatılmış** (`appLogsConfiguration.destination:
+  'none'` — bkz. `modules/containerAppsEnvironment.bicep`) bir Container Apps environment
+  kullanılıyor. Bu, ne Log Analytics ne de Azure Monitor hedefine yazan bir yapılandırmadır.
+  Bu kararı ADR-004'te tekrar okuyun; "biraz daha görünürlük için" ACR veya Log Analytics
   eklemeyin.
 - **`minReplicas: 0` ve `maxReplicas: 1` sınırları değiştirilmemelidir.** Bu sınırlar,
   Container App'in boştayken **compute (vCPU/bellek) ücretini sıfıra indirmesini** ve
@@ -85,9 +87,11 @@
 
 5. `infra/azure/main.example.bicepparam` dosyasını `infra/azure/main.bicepparam` olarak
    kopyalayın (bu dosya `.gitignore`'da — asla commit etmeyin) ve gerçek `tenantId` ile
-   benzersiz bir `keyVaultName` girin. `containerImage` alanını henüz **doldurmayın** — bu,
-   GHCR'a gerçek bir image push edildikten sonra, gerçek bir commit SHA ile doldurulacak
-   (bkz. §4).
+   benzersiz bir `keyVaultName` girin. `containerImageDigest` alanını henüz **doldurmayın** —
+   bu, GHCR'a gerçek bir image push edildikten sonra, registry'nin döndürdüğü gerçek
+   `sha256:<64 hex karakter>` digest'i ile doldurulacak (bkz. §4). Bu bir etiket (tag) değil,
+   digest'tir — `latest` gibi bir değer buraya asla girilemez, çünkü parametre uzunluğu tam
+   71 karaktere (`sha256:` + 64 hex karakter) sabitlenmiştir.
 
 ## 3. Bicep doğrulama (deployment değildir, Azure'a bağlanmaz)
 
@@ -105,12 +109,18 @@ kimlik doğrulaması gerektirmez. CI'da da otomatik çalışıyor (bkz.
 
 ## 4. GHCR image'ını hazırlama (bu runbook'un kapsamı dışında, ayrı bir görev)
 
-Bu Bicep şablonu, `ghcr.io/mustafanazli/repopulse-authapi:<immutable-commit-sha>` biçiminde
-**public** bir GHCR image referansı bekliyor. Image'ın gerçekten GHCR'a push edilmesi,
-mevcut `.github/workflows/authapi-container-build.yml` CI job'unun kapsamı dışındadır (o
-job yalnızca build eder, push etmez — bkz. o dosyanın kendi yorumları). GHCR'a push eden bir
-workflow, **ayrı bir görev** olarak, ayrı bir onayla eklenmelidir. **`latest` etiketi asla
-kullanılmamalıdır** — yalnızca değişmez (immutable) bir commit SHA etiketi.
+Bu Bicep şablonu, `ghcr.io/mustafanazli/repopulse-authapi` reposunu (bu repo adı
+`modules/containerApp.bicep` içinde sabittir, bir parametre değildir) yalnızca **image
+digest'i ile** (`@sha256:<64 hex karakter>`) adresler — hiçbir etiket (tag) kabul edilmez.
+Image'ın gerçekten GHCR'a push edilmesi, mevcut
+`.github/workflows/authapi-container-build.yml` CI job'unun kapsamı dışındadır (o job
+yalnızca build eder, push etmez — bkz. o dosyanın kendi yorumları). GHCR'a push eden bir
+workflow, **ayrı bir görev** olarak, ayrı bir onayla eklenmelidir. Push işlemi tamamlandıktan
+sonra, registry'nin döndürdüğü **gerçek digest değeri** (ör. `docker push` çıktısındaki
+`digest: sha256:...` satırı, ya da GHCR'ın paket sayfasındaki/registry API'sindeki digest)
+alınıp `main.bicepparam`'daki `containerImageDigest` parametresine yazılmalıdır. **`latest`
+etiketi veya herhangi bir mutable (değişebilir) etiket bu tasarımda hiçbir şekilde
+kullanılamaz** — parametre yalnızca bir digest kabul eder, bir tag değil.
 
 ## 5. Deployment adımları (Faz A: bootstrap altyapı — bu turda ÇALIŞTIRILMADI)
 

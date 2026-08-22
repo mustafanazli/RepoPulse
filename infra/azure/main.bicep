@@ -8,8 +8,10 @@ targetScope = 'subscription'
 //
 // This template intentionally does NOT create:
 //   - An Azure Container Registry (a public GHCR image is used instead).
-//   - A Log Analytics workspace (the Container Apps environment is
-//     deliberately workspace-less — see modules/containerAppsEnvironment.bicep).
+//   - A Log Analytics workspace (the Container Apps environment explicitly
+//     sets appLogsConfiguration.destination: 'none' — see
+//     modules/containerAppsEnvironment.bicep — rather than relying on any
+//     default behavior).
 //   - Any Key Vault secret (the real GitHubOAuth ClientSecret is added by a
 //     human, manually, in a separate step — see the runbook).
 // All three are cost/scope decisions, not omissions — see the runbook's
@@ -29,8 +31,10 @@ param tenantId string
 @maxLength(24)
 param keyVaultName string
 
-@description('Full container image reference for RepoPulse.AuthApi, pinned to an immutable commit SHA tag, e.g. ghcr.io/mustafanazli/repopulse-authapi:<40-char-commit-sha>. Must NEVER be "latest".')
-param containerImage string
+@description('SHA-256 digest of the RepoPulse.AuthApi image already built and pushed to GHCR, in the exact format "sha256:<64 lowercase hex characters>". This is a digest, not a tag — "latest" and mutable branch/commit tags cannot be expressed by this parameter at all. The GHCR repository itself is fixed in modules/containerApp.bicep, not parameterized here.')
+@minLength(71)
+@maxLength(71)
+param containerImageDigest string
 
 @description('Public GitHub OAuth App Client ID — not a secret.')
 param gitHubOAuthClientId string = 'Ov23likVt8K7YO1aqnfo'
@@ -72,7 +76,7 @@ module containerApp 'modules/containerApp.bicep' = {
     location: location
     containerAppName: 'ca-repopulse-authapi-staging'
     containerAppsEnvironmentId: containerAppsEnvironment.outputs.id
-    containerImage: containerImage
+    containerImageDigest: containerImageDigest
     gitHubOAuthClientId: gitHubOAuthClientId
     gitHubOAuthRedirectUri: gitHubOAuthRedirectUri
     gitHubOAuthTokenEndpoint: gitHubOAuthTokenEndpoint
