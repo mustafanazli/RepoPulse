@@ -1,0 +1,137 @@
+name: Publish RepoPulse.AuthApi to GHCR
+
+# Manual-only publishing. There is intentionally no `push`, `pull_request`,
+# `schedule`, or `release` trigger here — nothing about this workflow ever
+# runs automatically. A human must explicitly dispatch it from the Actions
+# tab (or `gh workflow run`), and only when `main` is the selected ref (see
+# the job-level `if` below, since `workflow_dispatch` itself has no branch
+# filter — unlike `push`/`pull_request`, GitHub does not support restricting
+# which ref a manual dispatch may target at the trigger level).
+on:
+  workflow_dispatch: {}
+
+# Prevents two publishes from racing each other (e.g. two people dispatching
+# at once, or a re-dispatch before the first finishes). A queued run waits
+# rather than cancelling an in-flight push, since cancelling mid-push could
+# leave a partially-uploaded image layer in the registry.
+concurrency:
+  group: ghcr-publish-authapi
+  cancel-in-progress: false
+
+# Least-privilege: only what pushing an image to GHCR with the automatic
+# token actually requires. No id-token, actions, deployments, attestations,
+# or delete:packages permission is granted.
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Dispatching this workflow from any ref other than refs/heads/main
+    # skips the entire job (status: skipped) — no checkout, build, login, or
+    # push step ever runs. This is the safe "exit without running" behavior;
+    # it deliberately does not attempt to fail loudly mid-job, since no
+    # credentialed or destructive action has happened yet at this point.
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f7ce87c1d6bead3e36075b2ce75da1f6cc28aaca # v3.9.0
+
+      - name: Log in to ghcr.io
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Repository and tag are both fixed expressions, never user input:
+      # - Repository is the literal string "ghcr.io/mustafanazli/repopulse-authapi".
+      # - Tag is exactly ${{ github.sha }} — the full commit SHA that
+      #   triggered this dispatch — never "latest" and never a branch name.
+      # This tag exists only for human traceability in the GHCR UI; per
+      # docs/deployment/ghcr-publishing.md and the staging runbook, Azure
+      # deployment must always reference the digest below, never this tag.
+      #
+      # provenance: false is explicit, not an oversight — without it, this
+      # action would attempt to push a provenance attestation, which is a
+      # separate write against the registry that this job's permissions
+      # (no `attestations: write`, no `id-token: write`) do not grant.
+      - name: Build and push RepoPulse.AuthApi image
+        id: build
+        uses: docker/build-push-action@4f58ea79222b3b9dc2c8bbdd6debcef730109a75 # v6.9.0
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          tags: ghcr.io/mustafanazli/repopulse-authapi:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/mustafanazli/RepoPulse
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.title=RepoPulse.AuthApi
+            org.opencontainers.image.description=GitHub OAuth Authorization Code + PKCE token-exchange backend for the RepoPulse Android app.
+
+      # The digest is not a secret — it is safe to print and to put in the
+      # job summary. This only validates its shape; it never trusts the
+      # unchecked action output for the deployment steps below.
+      - name: Validate returned digest format
+        id: digest
+        run: |
+          digest="${{ steps.build.outputs.digest }}"
+          echo "Registry-returned digest: $digest"
+          if [[ ! "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::Registry returned an unexpected digest format: '$digest' (expected sha256: followed by 64 lowercase hex characters)."
+            exit 1
+          fi
+          if [ "${#digest}" -ne 71 ]; then
+            echo "::error::Digest length is ${#digest} characters, expected exactly 71 (\"sha256:\" + 64 hex characters)."
+            exit 1
+          fi
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Write digest to job summary
+        run: |
+          {
+            echo "## RepoPulse.AuthApi published to GHCR"
+            echo ""
+            echo "- **Repository:** \`ghcr.io/mustafanazli/repopulse-authapi\`"
+            echo "- **Commit SHA tag (traceability only — do NOT use for deployment):** \`${{ github.sha }}\`"
+            echo "- **Immutable digest (USE THIS for any Azure deployment):** \`${{ steps.digest.outputs.digest }}\`"
+            echo ""
+            echo "Full digest-pinned reference:"
+            echo ""
+            echo '```'
+            echo "ghcr.io/mustafanazli/repopulse-authapi@${{ steps.digest.outputs.digest }}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Drop the just-used login credentials before the next step, so the
+      # following pull attempt is genuinely anonymous/unauthenticated —
+      # proving what an outside, unauthenticated deployer or reviewer would
+      # actually see, not what this job's own token can see.
+      - name: Log out of ghcr.io
+        if: always()
+        run: docker logout ghcr.io
+
+      # This workflow NEVER calls the GitHub Packages API to change
+      # visibility itself — making a package public is a one-way action a
+      # human must take deliberately in the GitHub UI (see
+      # docs/deployment/ghcr-publishing.md). This step only detects and
+      # reports the current state; it never assumes "just pushed" means
+      # "publicly pullable".
+      - name: Verify anonymous public access to the published digest
+        run: |
+          set +e
+          docker buildx imagetools inspect "ghcr.io/mustafanazli/repopulse-authapi@${{ steps.digest.outputs.digest }}"
+          status=$?
+          set -e
+          if [ "$status" -ne 0 ]; then
+            echo "::error::GHCR package was published but is not publicly accessible; change package visibility to Public manually."
+            exit 1
+          fi
+          echo "Anonymous manifest inspection succeeded — the package is publicly accessible."
