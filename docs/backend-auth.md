@@ -98,6 +98,25 @@ Backend'in `title` alanlı hata sözleşmesi (`invalid_request`/`oauth_exchange_
 
 **Token'ların bellek davranışı**: `accessToken`/`refreshToken`, `MainPage` üzerinde yalnızca özel (private) alanlarda, yalnızca bellekte tutuluyor. SecureStorage/SQLite/Preferences/dosya kullanılmıyor — uygulama kapanınca kayboluyor, bu RP-005 kapsamında kabul edilebilir. Refresh akışı henüz uygulanmadı.
 
+## Debug-only Android bağlantısı ve sertifika kabulü
+
+Android emülatörü host makinenin `localhost`'una doğrudan erişemez — Android'in bunun için belgelenmiş takma adı `10.0.2.2`'dir. Bu nedenle `MauiProgram.ResolveAuthApiBaseAddress()`:
+
+- **Android + DEBUG** → `https://10.0.2.2:7082`
+- **Diğer tüm DEBUG hedefleri** (Windows, iOS simulator, MacCatalyst) → `https://localhost:7082` (değişmedi)
+- **Her RELEASE build** → derleme sırasında açık bir `#warning` üretir ("hâlâ DEBUG-only localhost/10.0.2.2 placeholder'ı kullanıyorsun") ve yine `DevelopmentBaseAddress`'i döndürür — **gerçek production hosting adresi henüz belirlenmedi, bu ayrı bir görev.**
+
+### Self-signed geliştirme sertifikası
+
+Emülatördeki `10.0.2.2:7082` bağlantısı, `dotnet dev-certs https` ile üretilen self-signed `CN=localhost` sertifikasına ulaşır — bu sertifika emülatörün sistem güven deposunda değildir, standart TLS doğrulaması başarısız olur. Bunu çözmek için **yalnızca DEBUG build'de, yalnızca AuthApi `HttpClient`'ı için** dar kapsamlı bir doğrulama uygulanıyor:
+
+- Yardımcı sınıf: `RepoPulse.Core.Authentication.DevelopmentCertificateValidator` (saf, BCL-only, `RepoPulse.UnitTests`'te tam test kapsamıyla test edilebilir)
+- Kabul kriterleri (**hepsi** sağlanmalı): request host tam olarak `10.0.2.2`/`localhost`/`127.0.0.1` olmalı; sertifikanın `Subject` **ve** `Issuer`'ı tam olarak `CN=localhost` olmalı; sertifika geçerlilik tarihleri (`NotBefore`/`NotAfter`) şu anki zamanı kapsamalı
+- Bunların **herhangi biri** sağlanmazsa reddedilir — beklenmeyen host veya sertifika asla kabul edilmez
+- `GitHubApiClient` bu doğrulamayı **hiç kullanmaz** — her zaman normal platform TLS doğrulamasıyla çalışır
+- `ServerCertificateCustomValidationCallback` ataması tamamen `#if DEBUG` içindedir — **Release IL'inde hiç yer almaz** (derleme çıktısıyla doğrulandı: Release build'de bu koda dair hiçbir iz yok, yalnızca yukarıdaki placeholder-adres uyarısı var)
+- `DangerousAcceptAnyServerCertificateValidator` kullanılmadı, global SSL doğrulaması hiçbir yerde kapatılmadı
+
 ## Kapsam dışı (sonraki alt görevler)
 
 - Gerçek backend'e karşı gerçek mobil↔backend entegrasyon testi (emülatörde)
