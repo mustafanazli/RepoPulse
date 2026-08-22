@@ -121,7 +121,7 @@ az consumption budget create \
 
 - `https://<CONTAINERAPP_NAME>.<CONTAINERAPPS_ENVIRONMENT_DOMAIN>/health` → `200 {"status":"healthy"}`.
 - Gerçek bir tarayıcıdan HTTP (`http://...`) ile erişim denenip 8080'de bir yönlendirme döngüsü **oluşmadığı** doğrulanmalı.
-- **Staging'de ayrıca doğrulanması gereken açık risk** (bkz. ADR-004): `POST /oauth/github/exchange` rate limiter'ının partition key'i (`RemoteIpAddress`) Container Apps ingress'i arkasında gerçek istemci IP'sini mi yoksa proxy'nin kendi IP'sini mi görüyor. Bu doğrulanmadan rate limit davranışı "doğru çalışıyor" sayılmamalı.
+- 🛑 **PRODUCTION DEPLOYMENT BLOCKER — bu adım tamamlanmadan gerçek/genel production trafiği bu backend'e açılmamalı** (bkz. ADR-004): `POST /oauth/github/exchange` rate limiter'ının partition key'i (`RemoteIpAddress`) Container Apps ingress'i arkasında gerçek istemci IP'sini mi yoksa proxy'nin kendi IP'sini mi görüyor, staging'de doğrulanmalı. Container Apps'in gönderdiği `X-Forwarded-For` (veya eşdeğeri) header'ı incelenmeli. **Bu doğrulama sırasında gerçek/hassas IP değerleri hiçbir log satırına, rapora veya commit'e yazılmamalı** — yalnızca "beklenen davranış gözlendi/gözlenmedi" sonucu kaydedilmeli. Yalnızca bu doğrulamadan sonra, Container Apps'in gerçek çıkış IP aralıklarıyla sınırlı güvenli bir `ForwardedHeaders`/`KnownProxies` yapılandırması eklenmeli. Bu adım atlanıp doğrudan production trafiği açılırsa, rate limiter niyet edilenden çok daha agresif (tüm istemciler tek partition'da) veya etkisiz çalışabilir.
 
 ## 10. CI/CD için GitHub Actions OIDC (ayrı, sonraki bir görev)
 

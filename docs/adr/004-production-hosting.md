@@ -44,13 +44,21 @@ Bu değer yalnızca başlangıçta configuration'dan bağlanıyor, hiçbir reque
 
 **Bilinçli olarak eklenmedi**: `app.UseForwardedHeaders(...)`, geniş kapsamlı bir `ForwardedHeadersOptions` yapılandırması, `KnownNetworks`/`KnownProxies` temizlenmesi. Gerçek proxy topolojisi (Container Apps'in hangi IP aralıklarından geldiği) doğrulanmadan `X-Forwarded-For` gibi header'lara körü körüne güvenmek, IP sahteciliğine kapı açar.
 
-## Açık risk: rate limiter'ın client IP tespiti (ÇÖZÜLMEDİ)
+## 🛑 PRODUCTION DEPLOYMENT BLOCKER: rate limiter'ın client IP tespiti (ÇÖZÜLMEDİ)
 
 `POST /oauth/github/exchange` üzerindeki rate limiter, partition key olarak `HttpContext.Connection.RemoteIpAddress`'i kullanıyor (bkz. `Program.cs`). Bu, TCP bağlantısının **doğrudan karşı tarafının** IP'sidir.
 
 Azure Container Apps ingress'i arkasında, bu değer muhtemelen **gerçek istemci IP'si değil, Container Apps'in kendi dahili proxy IP'sidir** — çünkü yukarıda açıklandığı gibi `ForwardedHeaders` işleme bilinçli olarak eklenmedi. Sonuç: rate limiter, potansiyel olarak **tüm dış istemcileri tek bir partition'da** (proxy'nin IP'si) toplayabilir, bu da niyet edilenden çok daha agresif (herkes için ortak) bir rate limit'e yol açabilir.
 
-**Bu, "çözüldü" olarak işaretlenmiyor.** Gerçek Container Apps ortamında (staging), bu davranış ayrıca doğrulanmalı: gerçek istemci IP'sinin nasıl iletildiği belirlenmeli (Container Apps'in kendi `X-Forwarded-For` davranışı incelenerek), ve yalnızca o zaman güvenli bir `ForwardedHeaders`/`KnownProxies` yapılandırması eklenmelidir. Bu ADR'nin kapsamı, bu riski **belgelemek**tir, çözmek değil.
+**Bu, "çözüldü" olarak işaretlenmiyor ve şimdilik güvenli bir tahmine dayalı kod değişikliği de yapılmıyor** — gerçek Container Apps `X-Forwarded-For` davranışı bilinmeden yazılacak herhangi bir `ForwardedHeaders`/`KnownProxies` yapılandırması, doğrulanmamış bir varsayıma dayanır ve IP sahteciliğine kapı açabilir.
+
+**Bu madde, bu iş için bir production deployment blocker'ıdır:** RepoPulse.AuthApi'ye gerçek/genel production trafiği açılmadan önce, staging ortamında (gerçek bir Azure Container Apps dağıtımında) şu doğrulama yapılmalıdır:
+1. `HttpContext.Connection.RemoteIpAddress` değerinin gerçekte ne olduğu gözlemlenmeli (Container Apps'in kendi proxy'si mi, gerçek istemci mi).
+2. Container Apps'in gönderdiği `X-Forwarded-For` (veya eşdeğeri) header'ının gerçek istemci IP'sini nasıl taşıdığı belirlenmeli.
+3. Bu doğrulama yapılırken **gerçek/hassas IP değerleri hiçbir log satırına, rapora veya commit'e yazılmamalı** — yalnızca "beklenen davranış gözlendi/gözlenmedi" şeklinde bir sonuç kaydedilmeli, ham IP değerleri değil.
+4. Yalnızca bu doğrulamadan **sonra**, güvenli bir `ForwardedHeaders`/`KnownProxies` yapılandırması (Container Apps'in gerçek çıkış IP aralıklarıyla sınırlı) eklenmeli.
+
+Bu adımlar tamamlanana ve doğrulanana kadar **production trafiği bu backend'e açılmamalıdır** — aksi halde rate limiter, ya etkisiz (tüm istemciler tek partition'da) ya da yanlış davranabilir. Bu ADR'nin kapsamı, bu riski **belgelemek**tir, çözmek değil.
 
 ## Secret yönetimi ve managed identity
 

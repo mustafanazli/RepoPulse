@@ -6,6 +6,13 @@ on:
   pull_request:
     branches: [ main ]
 
+# Explicit least-privilege: this job only checks out code and builds an
+# image locally (never pushes, never authenticates anywhere), so it needs
+# nothing beyond read access to repo contents — declared here rather than
+# relying on the repository's default GITHUB_TOKEN permission setting.
+permissions:
+  contents: read
+
 jobs:
   build-image:
     runs-on: ubuntu-latest
