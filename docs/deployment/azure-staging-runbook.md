@@ -22,6 +22,12 @@
 
 ## 1. Maliyet korumaları (deployment'tan ÖNCE okuyun)
 
+- **Bu mimari "cost-controlled" (maliyet kontrollü) bir staging ortamıdır — "zero-cost"
+  (tamamen ücretsiz) bir garanti DEĞİLDİR.** Container App, Key Vault ve Container Apps
+  environment gibi burada tanımlanan Azure kaynakları, çalıştırıldığında Azure for Students
+  kredinizi tüketebilir. Dışarıdan gerçek bir ödeme çıkmaması yalnızca bu abonelik
+  Pay-As-You-Go'ya yükseltilmediği sürece geçerlidir; abonelik yükseltilirse veya kredi
+  tamamen tükenirse gerçek para ile faturalandırma başlayabilir.
 - **Azure for Students aboneliği asla Pay-As-You-Go'ya yükseltilmemelidir.** Azure bazen
   kredi bittiğinde veya süre dolduğunda yükseltme öneren bir bildirim gösterebilir — bunu
   kabul etmeyin.
@@ -31,8 +37,10 @@
   kararı ADR-004'te tekrar okuyun; "biraz daha görünürlük için" ACR veya Log Analytics
   eklemeyin.
 - **`minReplicas: 0` ve `maxReplicas: 1` sınırları değiştirilmemelidir.** Bu sınırlar,
-  Container App'in boştayken sıfır maliyetli olmasını ve yanlışlıkla birden fazla replika
-  ölçeklenip beklenmedik ücret oluşmasını önlemek için var.
+  Container App'in boştayken **compute (vCPU/bellek) ücretini sıfıra indirmesini** ve
+  yanlışlıkla birden fazla replika ölçeklenip beklenmedik ücret oluşmasını önlemek için var.
+  Bu yalnızca Container App'in compute ücretiyle ilgilidir — Key Vault ve Container Apps
+  environment gibi diğer kaynakların maliyeti için bir sonraki maddeye bakın.
 - **Kalan kredi süresi bu dokümanda sabit bir tarih olarak yazılmıyor.** Bu dokümanı
   yazarken kalan kredinin yaklaşık 45 gün olduğu belirtilmişti, ancak bu değer zamanla
   değişir — **gerçek bir deployment'tan hemen önce, Azure portalında "Cost Management +
@@ -192,15 +200,36 @@ grubunu** hedefler. **Bu abonelikte önceden var olan, RepoPulse ile ilgisiz
 `TranslatorAppGrubu` kaynak grubuna KESİNLİKLE dokunulmamalıdır** — aşağıdaki hiçbir komut
 onu hedeflemez ve elle çalıştırırken de hedeflenmemelidir.
 
+**Silme komutunu çalıştırmadan ÖNCE, sırayla, üç ayrı doğrulama yapın:**
+
+1. Doğru abonelikte olduğunuzu doğrulayın (birden fazla abonelikle çalışıyorsanız özellikle
+   önemli — yanlış abonelikte çalıştırılan bir `az group delete`, hedef adı doğru olsa bile
+   tamamen farklı bir ortamı silebilir):
+
+   ```
+   az account show --query "{name:name, id:id}" -o table
+   ```
+
+2. Hedef kaynak grubunun var olduğunu VE adının tam olarak `rg-repopulse-staging` olduğunu
+   doğrulayın:
+
+   ```
+   az group show --name rg-repopulse-staging --query name -o tsv
+   ```
+
+3. Silmeden önce bu kaynak grubunun içinde gerçekten NELERİN olduğunu görün — beklemediğiniz
+   bir kaynak varsa (ör. yanlışlıkla başka bir projenin kaynağı buraya eklenmişse) durun ve
+   araştırın, silme komutunu çalıştırmayın:
+
+   ```
+   az resource list --resource-group rg-repopulse-staging -o table
+   ```
+
+Yalnızca yukarıdaki üç adım da beklenen sonucu verdikten sonra silme komutunu çalıştırın:
+
 ```
 # Yalnızca RepoPulse staging kaynak grubunu siler — TranslatorAppGrubu'nu ETKİLEMEZ.
 az group delete --name rg-repopulse-staging --yes --no-wait
-```
-
-Silmeden önce doğru kaynak grubunu hedeflediğinizi iki kez kontrol edin:
-
-```
-az group show --name rg-repopulse-staging --query name -o tsv
 ```
 
 ## 9. Özet: gerçek deployment öncesi açık kullanıcı onayları
