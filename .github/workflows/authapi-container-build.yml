@@ -1,0 +1,34 @@
+name: AuthApi container build check
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# Explicit least-privilege: this job only checks out code and builds an
+# image locally (never pushes, never authenticates anywhere), so it needs
+# nothing beyond read access to repo contents — declared here rather than
+# relying on the repository's default GITHUB_TOKEN permission setting.
+permissions:
+  contents: read
+
+jobs:
+  build-image:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Build-only smoke test: proves the multi-stage Dockerfile still
+      # produces a working image. Deliberately does NOT push to any
+      # registry, does NOT authenticate to Azure, and does NOT use any
+      # secret — this is a pure build-context check.
+      - name: Build RepoPulse.AuthApi image (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          tags: repopulse-authapi:ci-build
