@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- Development-only secret storage; see docs/backend-auth.md. Never put
+         the actual ClientSecret in this file or any tracked file. -->
+    <UserSecretsId>c2f2f7f0-2f1a-4a2e-9c7a-2b6b3d4e5f6a</UserSecretsId>
+  </PropertyGroup>
+
+</Project>

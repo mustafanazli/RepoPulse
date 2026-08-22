@@ -34,10 +34,21 @@ jobs:
       - name: Run unit tests
         run: dotnet test tests/RepoPulse.UnitTests/RepoPulse.UnitTests.csproj -c Release --no-build --logger "trx;LogFileName=test-results.trx"
 
+      - name: Run AuthApi tests
+        run: dotnet test tests/RepoPulse.AuthApi.Tests/RepoPulse.AuthApi.Tests.csproj -c Release --no-build --logger "trx;LogFileName=authapi-test-results.trx"
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: unit-test-results
           path: tests/RepoPulse.UnitTests/TestResults/test-results.trx
+          if-no-files-found: warn
+
+      - name: Upload AuthApi test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: authapi-test-results
+          path: tests/RepoPulse.AuthApi.Tests/TestResults/authapi-test-results.trx
           if-no-files-found: warn

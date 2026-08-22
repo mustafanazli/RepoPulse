@@ -31,13 +31,28 @@
                 Clicked="OnCounterClicked"
                 HorizontalOptions="Fill" />
 
-            <!-- RP-002 dev-only OAuth callback verification widget; no sensitive values shown -->
+            <!-- RP-003 GitHub sign-in prototype; no token/code/state ever shown here -->
             <Label
-                Text="OAuth Callback (dev)"
+                Text="GitHub Girişi (dev)"
                 Style="{StaticResource SubHeadline}" />
+            <Button
+                x:Name="SignInButton"
+                Text="GitHub ile giriş yap"
+                Clicked="OnSignInClicked"
+                HorizontalOptions="Fill" />
             <Label
                 x:Name="OAuthCallbackStatusLabel"
                 Text="Henüz callback alınmadı" />
+            <Image
+                x:Name="GitHubAvatarImage"
+                HeightRequest="64"
+                WidthRequest="64"
+                Aspect="AspectFill"
+                IsVisible="False"
+                SemanticProperties.Description="GitHub profil fotoğrafı" />
+            <Label
+                x:Name="GitHubLoginLabel"
+                IsVisible="False" />
         </VerticalStackLayout>
     </ScrollView>
 

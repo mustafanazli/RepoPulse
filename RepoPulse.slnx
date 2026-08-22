@@ -1,8 +1,10 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/RepoPulse.AuthApi/RepoPulse.AuthApi.csproj" />
     <Project Path="src/RepoPulse.Core/RepoPulse.Core.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/RepoPulse.AuthApi.Tests/RepoPulse.AuthApi.Tests.csproj" />
     <Project Path="tests/RepoPulse.UnitTests/RepoPulse.UnitTests.csproj" />
   </Folder>
   <Project Path="RepoPulse/RepoPulse.csproj" />
