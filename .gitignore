@@ -52,3 +52,8 @@ Thumbs.db
 # User-specific secrets (never commit tokens/keys)
 *.secrets.json
 appsettings.*.local.json
+
+# Real Azure deployment parameters (subscription-specific tenant ID, Key
+# Vault name choice, etc.) — only the .example.bicepparam template is
+# tracked; see infra/azure/main.example.bicepparam.
+infra/azure/main.bicepparam

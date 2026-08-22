@@ -1,0 +1,39 @@
+name: Bicep validate
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+# Explicit least-privilege: this job only checks out code and compiles
+# Bicep files locally on the runner (no Azure login, no credential, no
+# secret, no deployment) — it needs nothing beyond read access to repo
+# contents.
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # GitHub-hosted ubuntu-latest runners ship the Azure CLI preinstalled
+      # and already logged OUT — this only downloads the standalone Bicep
+      # compiler binary from Microsoft's public release feed. No `az
+      # login`, Azure credential, or GitHub secret is used anywhere in this
+      # job, and no `az deployment`/`az group`/etc. command is ever run.
+      - name: Install Bicep CLI
+        run: az bicep install
+
+      - name: Build every Bicep file (compile-time validation only)
+        run: |
+          set -e
+          for f in $(find infra/azure -name '*.bicep' | sort); do
+            echo "::group::az bicep build $f"
+            az bicep build --file "$f" --stdout > /dev/null
+            echo "::endgroup::"
+          done
