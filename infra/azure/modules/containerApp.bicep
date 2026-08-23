@@ -10,12 +10,8 @@ param containerAppsEnvironmentId string
 @description('Resource ID of the existing user-assigned managed identity (created in Phase A, already granted Key Vault Secrets User on the Key Vault) to assign to this Container App. NOT a system-assigned identity — see docs/adr/004-production-hosting.md for why this template no longer uses SystemAssigned.')
 param userAssignedIdentityId string
 
-@description('Full, versionless Key Vault secret URI for the GitHub OAuth client secret, e.g. https://<vault>.vault.azure.net/secrets/github-oauth-client-secret. This module never reads or sets the secret VALUE — only wires up this reference so the platform resolves it at runtime using the user-assigned identity above. Marked @secure() out of caution (it names a Key Vault + secret name, not a credential), which also silences the linter\'s name-based secret heuristic.')
-@secure()
-param clientSecretKeyVaultUrl string
-
-@description('Name used for the Container Apps secret that resolves the Key Vault reference above. This is a Container Apps secret NAME, not the secret value.')
-param clientSecretName string = 'github-oauth-client-secret'
+@description('Name of the existing Key Vault (created in Phase A) that already contains the real GitHubOAuth client secret. This is an IDENTITY only — a plain Key Vault name, never a URL or a secret path. The caller cannot supply a different host or path: this module builds the exact secret URL itself, below, from this name and a fixed secret name.')
+param keyVaultName string
 
 @description('SHA-256 digest of the RepoPulse.AuthApi image already built and pushed to GHCR, in the exact format "sha256:<64 lowercase hex characters>". Obtain this from the real GHCR push output (the digest GHCR/`docker push` reports, or a registry API digest lookup) after the image has actually been pushed — never fabricate or guess this value. This parameter accepts ONLY a digest, never a tag: neither "latest" nor any mutable branch/commit tag can be expressed here at all, because the repository is fixed below and addressed exclusively by @<digest>.')
 @minLength(71)
@@ -48,6 +44,24 @@ var containerTargetPort = 8080
 // a branch/commit tag). See docs/deployment/azure-staging-runbook.md §4.
 var containerImageRepository = 'ghcr.io/mustafanazli/repopulse-authapi'
 var containerImage = '${containerImageRepository}@${containerImageDigest}'
+
+// Secret NAME is fixed in Bicep, not a parameter — no caller (bicepparam or
+// otherwise) can point this at a different secret name.
+var clientSecretName = 'github-oauth-client-secret'
+
+// The Key Vault secret URL is built entirely inside this module, from the
+// Key Vault's own canonical `vaultUri` property (via an `existing` lookup)
+// plus the fixed secret name above — never accepted as a free-form
+// parameter. `vaultUri` is used rather than manually assembling
+// `https://${keyVaultName}.vault.azure.net/` or
+// `environment().suffixes.keyvaultDns`: it is the vault resource's own,
+// always-correct URI, with no assumption about which Azure cloud
+// (Public/Government/China) this deploys into baked in here.
+resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
+  name: keyVaultName
+}
+
+var clientSecretKeyVaultUrl = '${keyVault.properties.vaultUri}secrets/${clientSecretName}'
 
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: containerAppName

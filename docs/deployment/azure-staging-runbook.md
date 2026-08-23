@@ -163,6 +163,15 @@ digest değeri** alınıp `app.bicepparam`'daki `containerImageDigest` parametre
 yazılmalıdır. **`latest` etiketi veya herhangi bir mutable etiket bu tasarımda hiçbir
 şekilde kullanılamaz.**
 
+**Güncel durum:** `authapi-publish-ghcr.yml` bir kez, manuel olarak, `main`'den dispatch
+edildi (run #32623102931, sonuç: success). Gerçek bir immutable digest zaten mevcut;
+package public olarak doğrulandı (`docker logout` sonrası anonim `docker buildx imagetools
+inspect ghcr.io/mustafanazli/repopulse-authapi@<digest>` başarıyla manifest döndürdü — hiçbir
+kimlik doğrulaması olmadan). Bu adım için **yeniden bir push yapmaya gerek yok** — kalan tek
+iş, bu doğrulanmış gerçek digest'i `app.bicepparam`'a yazmaktır (bkz. §7, adım 6). **Tam
+digest değeri bu dokümana veya başka hiçbir tracked dosyaya yazılmaz** — yalnızca ilgili
+workflow run'ın job summary'sinde ve yerel, gitignored `app.bicepparam` içinde bulunur.
+
 ## 7. Deployment sırası (kesin sıra)
 
 1. **Portal kredi/bitiş kontrolü** — bkz. §2.
@@ -321,8 +330,9 @@ secret hiçbir noktada log'a veya rapora yazılmamalıdır.**
 - [ ] Identity + Key Vault rolünün doğrulanması
 - [ ] Gerçek secret'ın portal üzerinden Key Vault'a elle eklenmesi
 - [ ] Secret metadata'sının (değeri değil) doğrulanması
-- [ ] Gerçek bir GHCR image'ının build edilip push edilmesi ve digest'inin alınması
-- [ ] `app.bicepparam`'ın gerçek digest ile doldurulması
+- [x] Gerçek bir GHCR image'ının build edilip push edilmesi ve digest'inin alınması —
+      **tamamlandı** (run #32623102931, public, anonim erişim doğrulandı)
+- [ ] `app.bicepparam`'ın bu doğrulanmış gerçek digest ile doldurulması
 - [ ] Faz B what-if'in incelenmesi ve onaylanması
 - [ ] Faz B deployment'ının (`az deployment group create`) çalıştırılması onayı
 - [ ] `/health` ve rate-limit/client-IP staging testinin tamamlanması ve belgelenmesi

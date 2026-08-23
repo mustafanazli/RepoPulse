@@ -34,9 +34,6 @@ param identityName string
 @description('Name of the Container App to create.')
 param containerAppName string = 'ca-repopulse-authapi-staging'
 
-@description('Name of the secret that must already exist in the Key Vault above. This deployment does not create, read, or set its value — only references it by name/URL.')
-param keyVaultSecretName string = 'github-oauth-client-secret'
-
 @description('SHA-256 digest of the RepoPulse.AuthApi image already built and pushed to GHCR, in the exact format "sha256:<64 lowercase hex characters>". This is a digest, not a tag — "latest" and mutable branch/commit tags cannot be expressed by this parameter at all. The GHCR repository itself is fixed in modules/containerApp.bicep, not parameterized here.')
 @minLength(71)
 @maxLength(71)
@@ -55,14 +52,16 @@ resource containerAppsEnvironment 'Microsoft.App/managedEnvironments@2024-03-01'
   name: containerAppsEnvironmentName
 }
 
-resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
-  name: keyVaultName
-}
-
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' existing = {
   name: identityName
 }
 
+// Note: no `existing` Key Vault lookup here — modules/containerApp.bicep
+// does its own `existing` lookup from the plain keyVaultName below and
+// builds the exact secret URL internally, from a fixed secret name. This
+// file only ever passes an IDENTITY (a Key Vault name), never a URL or
+// secret path, so no caller of this template (or its .bicepparam) can
+// point the Container App at a different vault host or secret path.
 module containerApp 'modules/containerApp.bicep' = {
   name: 'containerApp'
   params: {
@@ -70,10 +69,7 @@ module containerApp 'modules/containerApp.bicep' = {
     containerAppName: containerAppName
     containerAppsEnvironmentId: containerAppsEnvironment.id
     userAssignedIdentityId: identity.id
-    // Versionless Key Vault secret URI — Container Apps resolves the
-    // current version at runtime. Never a secret VALUE, only a reference.
-    clientSecretKeyVaultUrl: '${keyVault.properties.vaultUri}secrets/${keyVaultSecretName}'
-    clientSecretName: keyVaultSecretName
+    keyVaultName: keyVaultName
     containerImageDigest: containerImageDigest
     gitHubOAuthClientId: gitHubOAuthClientId
     gitHubOAuthRedirectUri: gitHubOAuthRedirectUri
