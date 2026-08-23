@@ -54,6 +54,9 @@ Thumbs.db
 appsettings.*.local.json
 
 # Real Azure deployment parameters (subscription-specific tenant ID, Key
-# Vault name choice, etc.) — only the .example.bicepparam template is
-# tracked; see infra/azure/main.example.bicepparam.
+# Vault name choice, real container image digest, etc.) — only the
+# .example.bicepparam templates are tracked; see
+# infra/azure/main.example.bicepparam (Phase A) and
+# infra/azure/app.example.bicepparam (Phase B).
 infra/azure/main.bicepparam
+infra/azure/app.bicepparam
