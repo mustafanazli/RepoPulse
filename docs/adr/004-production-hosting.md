@@ -64,9 +64,29 @@ Bu adımlar tamamlanana ve doğrulanana kadar **production trafiği bu backend'e
 
 - **Gerçek `client_secret` hiçbir zaman şurada tutulmayacak**: Docker image içinde, repo içinde (kaynak kodu, appsettings, .env dosyası) veya GitHub Actions workflow/secret olarak düz metin şeklinde.
 - GitHub OAuth `ClientSecret`, **Azure Key Vault**'ta bir secret olarak tutulacak.
-- Container App, bir **system-assigned managed identity** kullanacak.
-- Bu managed identity'ye Key Vault üzerinde yalnızca **"Key Vault Secrets User"** rolü (yalnızca okuma) verilecek — daha geniş bir yetki değil.
+- Container App, bir **user-assigned managed identity** kullanacak — **system-assigned değil** (aşağıdaki "Bootstrap ve application deployment'ın ayrılması" bölümüne bakınız; bu, ilk tasarımdan sonradan değiştirilmiş bir karardır).
+- Bu managed identity'ye Key Vault üzerinde yalnızca **"Key Vault Secrets User"** rolü (yalnızca okuma), **yalnızca o Key Vault kapsamında** (subscription veya resource-group kapsamında değil) verilecek — daha geniş bir yetki değil.
 - Key Vault'taki secret, bir **Container Apps secret reference** aracılığıyla `GitHubOAuth__ClientSecret` ortam değişkenine bağlanacak (ASP.NET Core'un çift alt çizgi (`__`) konfigürasyon-anahtarı-ayırma kuralı, `GitHubOAuth:ClientSecret`'a karşılık gelir — bkz. `GitHubOAuthOptions.cs`). Bu sayede secret, Container App tanımının kendisinde düz metin olarak görünmez.
+
+## Bootstrap ve application deployment'ın ayrılması (iki fazlı IaC)
+
+İlk tasarımda tek bir Bicep şablonu (`infra/azure/main.bicep`) hem bootstrap altyapısını (resource group, Container Apps environment, Key Vault) hem de gerçek image'la Container App'i **aynı deployment'ta** oluşturuyordu, Container App'e de **system-assigned** bir identity atanıyordu. Bu tasarımda şu döngüsel/sıralama sorunu vardı:
+
+- Container App, gerçek GHCR image'ıyla ama `GitHubOAuth__ClientSecret` **olmadan** oluşturuluyordu — `GitHubOAuthOptionsValidator.ValidateOnStart()` bu nedenle container'ı **ilk deployment'tan itibaren crash-loop'a sokuyordu** (bu, dokümantasyonda "beklenen davranış" olarak kabul edilmişti, ama asıl sorun bu değildi).
+- System-assigned identity'nin `principalId`'si, yalnızca Container App **oluşturulduktan sonra** var oluyor — bu da Key Vault Secrets User rol atamasının, henüz var olmayan bir identity'ye bağımlı, tek bir büyük deployment içinde sıkışmasına neden oluyordu.
+
+**Düzeltme:** Altyapı artık iki ayrı, sıralı Bicep şablonuna bölündü:
+
+- **Faz A — `infra/azure/main.bicep`** (subscription scope): resource group, Container Apps environment, boş Key Vault, ve bir **user-assigned managed identity** oluşturur; bu identity'ye Key Vault Secrets User rolünü **aynı Faz A deployment'ı içinde** verir. **Container App'i hiç oluşturmaz.**
+- **Faz B — `infra/azure/app.bicep`** (resource-group scope): Faz A'nın oluşturduğu environment/Key Vault/identity'yi `existing` referanslarla kullanır; Container App'i **yalnızca bu noktada**, zaten var olan ve zaten Key Vault rolüne sahip olan identity'yi atayarak oluşturur.
+
+Bu sıralama sayesinde, Container App ilk oluşturulduğu andan itibaren, kendi Key Vault secret reference'ını çözebilecek bir identity'ye zaten sahiptir — tek eksik, gerçek secret değerinin Key Vault'a insan tarafından elle eklenmiş olmasıdır (bkz. `docs/deployment/azure-staging-runbook.md` Faz B, adım 5-6). Bu, döngüsel bağımlılığı ortadan kaldırır; "secret eksikse crash-loop" davranışı hâlâ mevcuttur (bu kasıtlıdır, `ValidateOnStart()` fail-fast tasarımının bir parçasıdır) ama artık yalnızca "secret Key Vault'a henüz eklenmedi" durumunda, identity/RBAC eksikliğinden değil.
+
+## Log routing: `azure-monitor`, `none` değil
+
+İlk tasarımda Container Apps environment'ının `appLogsConfiguration.destination` değeri `'none'` olarak ayarlanmıştı — amaç, bir Log Analytics workspace'i (ve onun sürekli maliyetini) hiç oluşturmamaktı. Bu değer Bicep'in statik tip kontrolünden geçti, ancak **gerçek `Microsoft.App/managedEnvironments` (2024-03-01) resource provider'ı**, Poland Central'da canlı bir `--validation-level Provider` what-if önizlemesi sırasında bunu reddetti: *"App Logs destination 'none' not supported. Supported values: 'log-analytics', 'azure-monitor'."*
+
+**Düzeltme:** `destination: 'azure-monitor'` kullanılıyor. Bu **yalnızca bir routing modudur**, `'log-analytics'`'in aksine (ki o bir Log Analytics workspace + `customerId`/`sharedKey` gerektirir) **hiçbir ek workspace, diagnostic setting veya Application Insights kaynağı gerektirmez** — bu şablonda hiçbiri oluşturulmuyor, ve `Microsoft.Insights`/`Microsoft.OperationalInsights` provider'ı bu şablon için hiç kaydedilmiyor. Bu **"kesin sıfır maliyet" garantisi değildir** — yalnızca ücretli, kalıcı bir log depolama kaynağının (workspace) burada oluşturulmadığı anlamına gelir. Staging sırasında gerektiğinde `az containerapp logs show ... --follow` ile gerçek zamanlı log stream'i hâlâ kullanılabilir. İleride kalıcı bir log hedefi (Log Analytics workspace + diagnostic settings) eklemek, ayrı bir maliyet/güvenlik kararı gerektirir — bu turun kapsamında değildir.
 
 ## CI/CD kimlik doğrulama: GitHub Actions OIDC
 

@@ -1,72 +1,113 @@
 # RepoPulse Azure staging — deployment runbook
 
 > **Bu doküman, gelecekte gerçek bir insan tarafından elle uygulanacak bir kontrol listesidir.**
-> `infra/azure/` altındaki Bicep şablonları bu turda **hiçbir Azure kaynağına karşı çalıştırılmadı** —
-> ne `az deployment ... create`, ne `az deployment ... what-if`. Aşağıdaki tüm komutlar
+> `infra/azure/` altındaki Bicep şablonları, bu dokümanın son güncellendiği turda **hiçbir
+> gerçek Azure kaynağına karşı çalıştırılmadı** — yalnızca salt-okunur `what-if` önizlemeleri
+> yapıldı, hiçbir `az deployment ... create` çalıştırılmadı. Aşağıdaki tüm komutlar
 > incelenmek ve **daha sonra, açık onayınızla** çalıştırılmak üzere yazılmıştır.
 > Mimari gerekçe için bkz. [ADR-004](../adr/004-production-hosting.md).
 
-## 0. Bu turda NELERİN yapılmadığı
+## 0. İki fazlı altyapı — dosya haritası
 
-- Hiçbir `az provider register` çalıştırılmadı (Microsoft.App, Microsoft.KeyVault,
-  Microsoft.ManagedIdentity hâlâ **NotRegistered**).
-- Hiçbir Azure resource group, Key Vault, Container Apps environment veya Container App
-  oluşturulmadı.
-- Hiçbir `az deployment` komutu (ne gerçek deployment ne de `what-if`) çalıştırılmadı.
-- Hiçbir Azure Container Registry oluşturulmadı veya `Microsoft.ContainerRegistry` kaydedilmedi
-  — bu mimari **kasıtlı olarak** ACR kullanmıyor, bunun yerine public bir GHCR image referansı
-  kullanıyor.
+Altyapı artık **iki ayrı, sıralı Bicep şablonuna** bölünmüş durumda (bkz. ADR-004'ün
+"Bootstrap ve application deployment'ın ayrılması" bölümü):
+
+| Dosya | Scope | İçerik |
+|---|---|---|
+| `infra/azure/main.bicep` | subscription | **Faz A** — resource group, Container Apps environment, boş Key Vault, user-assigned managed identity + Key Vault rolü. **Container App YOK.** |
+| `infra/azure/app.bicep` | resource group | **Faz B** — yalnızca Container App; Faz A'nın kaynaklarını `existing` referanslarla kullanır. |
+| `infra/azure/main.example.bicepparam` | — | Faz A örnek parametreleri (tracked). |
+| `infra/azure/app.example.bicepparam` | — | Faz B örnek parametreleri (tracked). |
+| `infra/azure/main.bicepparam` | — | Faz A gerçek parametreleri (`.gitignore`'da, **asla commit etmeyin**). |
+| `infra/azure/app.bicepparam` | — | Faz B gerçek parametreleri (`.gitignore`'da, **asla commit etmeyin**). |
+
+Faz A **her zaman** Faz B'den önce, tamamen bitmiş olmalıdır. Faz B, Faz A'nın çıktısı olan
+kaynak adlarını (`resourceGroupName`, `containerAppsEnvironmentName`, `keyVaultName`,
+`identityName`) referans alır.
+
+## 1. Bu dokümanın en son güncellendiği turda NELERİN yapılmadığı
+
+- Hiçbir `az provider register` bu turda çalıştırılmadı (önceki bir turda yalnızca
+  `Microsoft.App`, `Microsoft.KeyVault`, `Microsoft.ManagedIdentity` kaydedilmişti —
+  `Microsoft.ContainerRegistry` ve `Microsoft.OperationalInsights` hâlâ **NotRegistered**).
+- Hiçbir Azure resource group, Key Vault, Container Apps environment, user-assigned identity
+  veya Container App oluşturulmadı — yalnızca salt-okunur `what-if` önizlemeleri denendi.
+- Hiçbir `az deployment ... create` komutu çalıştırılmadı.
+- Hiçbir Azure Container Registry oluşturulmadı veya `Microsoft.ContainerRegistry` kaydedilmedi.
+- Hiçbir Log Analytics workspace, Application Insights veya `Microsoft.Insights`
+  diagnosticSettings kaynağı oluşturulmadı; `Microsoft.Insights`/`Microsoft.OperationalInsights`
+  provider'ı hiç kaydedilmedi.
 - Hiçbir Key Vault secret'ı oluşturulmadı.
-- Hiçbir GitHub secret'ı oluşturulmadı, hiçbir image GHCR'a push edilmedi.
-- Abonelik Pay-As-You-Go'ya yükseltilmedi ve bu runbook'un hiçbir adımı bunu gerektirmiyor.
+- Abonelik Pay-As-You-Go'ya yükseltilmedi.
 
-## 1. Maliyet korumaları (deployment'tan ÖNCE okuyun)
+## 2. Maliyet korumaları (deployment'tan ÖNCE okuyun)
 
 - **Bu mimari "cost-controlled" (maliyet kontrollü) bir staging ortamıdır — "zero-cost"
-  (tamamen ücretsiz) bir garanti DEĞİLDİR.** Container App, Key Vault ve Container Apps
-  environment gibi burada tanımlanan Azure kaynakları, çalıştırıldığında Azure for Students
-  kredinizi tüketebilir. Dışarıdan gerçek bir ödeme çıkmaması yalnızca bu abonelik
-  Pay-As-You-Go'ya yükseltilmediği sürece geçerlidir; abonelik yükseltilirse veya kredi
-  tamamen tükenirse gerçek para ile faturalandırma başlayabilir.
-- **Azure for Students aboneliği asla Pay-As-You-Go'ya yükseltilmemelidir.** Azure bazen
-  kredi bittiğinde veya süre dolduğunda yükseltme öneren bir bildirim gösterebilir — bunu
-  kabul etmeyin.
+  (tamamen ücretsiz) bir garanti DEĞİLDİR.** Container App, Key Vault, Container Apps
+  environment ve user-assigned identity gibi burada tanımlanan Azure kaynakları,
+  çalıştırıldığında Azure for Students kredinizi tüketebilir. Dışarıdan gerçek bir ödeme
+  çıkmaması yalnızca bu abonelik Pay-As-You-Go'ya yükseltilmediği sürece geçerlidir;
+  abonelik yükseltilirse veya kredi tamamen tükenirse gerçek para ile faturalandırma
+  başlayabilir.
+- **Azure for Students aboneliği asla Pay-As-You-Go'ya yükseltilmemelidir.**
 - **Azure Container Registry ve Log Analytics workspace bu mimaride bilinçli olarak
   oluşturulmuyor** — ikisi de sürekli (idle'dayken bile) ücret doğurabilir; bunun yerine
-  public GHCR image'ı ve loglaması **açıkça kapatılmış** (`appLogsConfiguration.destination:
-  'none'` — bkz. `modules/containerAppsEnvironment.bicep`) bir Container Apps environment
-  kullanılıyor. Bu, ne Log Analytics ne de Azure Monitor hedefine yazan bir yapılandırmadır.
-  Bu kararı ADR-004'te tekrar okuyun; "biraz daha görünürlük için" ACR veya Log Analytics
-  eklemeyin.
+  public GHCR image'ı ve `azure-monitor` **routing modu** (kalıcı bir depolama kaynağı
+  değil — bkz. §3) kullanılıyor.
+- **User-assigned managed identity kendi başına ek ücret oluşturmaz**, ancak Azure'ın
+  fiyatlandırma politikaları zamanla değişebilir — **gerçek bir deployment'tan hemen önce
+  Azure'ın güncel fiyatlandırma sayfasından tekrar kontrol edin.**
 - **`minReplicas: 0` ve `maxReplicas: 1` sınırları değiştirilmemelidir.** Bu sınırlar,
   Container App'in boştayken **compute (vCPU/bellek) ücretini sıfıra indirmesini** ve
   yanlışlıkla birden fazla replika ölçeklenip beklenmedik ücret oluşmasını önlemek için var.
-  Bu yalnızca Container App'in compute ücretiyle ilgilidir — Key Vault ve Container Apps
-  environment gibi diğer kaynakların maliyeti için bir sonraki maddeye bakın.
-- **Kalan kredi süresi bu dokümanda sabit bir tarih olarak yazılmıyor.** Bu dokümanı
-  yazarken kalan kredinin yaklaşık 45 gün olduğu belirtilmişti, ancak bu değer zamanla
-  değişir — **gerçek bir deployment'tan hemen önce, Azure portalında "Cost Management +
-  Billing" → "Azure for Students" sayfasından kalan kredi ve bitiş tarihi mutlaka tekrar
-  kontrol edilmelidir.**
+- **Kalan kredi süresi bu dokümanda sabit bir tarih olarak yazılmıyor** — gerçek bir
+  deployment'tan hemen önce, Azure portalında "Cost Management + Billing" → "Azure for
+  Students" sayfasından kalan kredi ve bitiş tarihi mutlaka tekrar kontrol edilmelidir.
 - **Bir Azure Budget/cost alert oluşturmak harcamayı otomatik olarak DURDURMAZ** — yalnızca
-  bir eşiğe ulaşıldığında bir bildirim/e-posta gönderir. Bütçe alarmı kurulmuş olması, kredi
-  bitene kadar kaynakların güvenle çalışmaya devam edebileceği anlamına gelmez.
-- **Azure Marketplace'ten hiçbir ürün/kaynak kullanılmayacaktır** — bu mimarideki tüm
-  kaynaklar (Container Apps, Key Vault) doğrudan Microsoft birinci taraf hizmetleridir,
-  üçüncü taraf Marketplace teklifleri değildir. Gelecekte bu mimariye bir şey eklerken
-  Marketplace kaynaklarından kaçının.
-- **Krediniz bitmeden, kullanmadığınız zaman kaynaklar kaldırılmalıdır** — bkz. §6
-  "Cleanup" bölümü. `minReplicas: 0` boştayken compute ücretini sıfırlar, ancak Key Vault ve
-  Container Apps environment'ın kendisi hâlâ (küçük de olsa) bir maliyet taşıyabilir; uzun
-  süre kullanılmayacaksa tamamen kaldırın.
+  bir eşiğe ulaşıldığında bir bildirim/e-posta gönderir.
+- **Azure Marketplace'ten hiçbir ürün/kaynak kullanılmayacaktır.**
+- **Bu abonelikte bir "izin verilen deployment bölgeleri" (`sys.regionrestriction`) policy'si
+  tespit edildi** — West Europe ve North Europe bu policy tarafından **reddedildi**. Gerçek
+  deployment'tan önce, izin verilen bölge listesini kendi aboneliğinizde tekrar kontrol edin:
+  ```
+  az policy assignment show --name sys.regionrestriction --query "parameters.listOfAllowedLocations.value" -o json
+  ```
+  Bu liste zamanla değişebilir; bu dokümanı yazarken izinli olan bölgeler arasında
+  `polandcentral` de vardı, ancak bunu sabit bir gerçek olarak varsaymayın.
+- **Krediniz bitmeden, kullanmadığınız zaman kaynaklar kaldırılmalıdır** — bkz. §9 "Cleanup".
 
-## 2. Ön koşullar (elle, sırayla)
+## 3. Log routing kararı: `azure-monitor`, `none` değil
 
-1. Azure portalında kalan Azure for Students kredisini ve bitiş tarihini tekrar kontrol edin (bkz. §1).
-2. Bir Azure Budget/cost alert oluşturun (bu runbook'un kapsamı dışında — Azure portalı
-   üzerinden "Cost Management + Billing" → "Budgets" ile elle yapılır).
-3. Aşağıdaki provider'ları kaydedin (**bu turda ÇALIŞTIRILMADI**, yalnızca gelecekte, açık
-   onayınızla çalıştırılacak referans komutlar):
+Container Apps environment'ının `appLogsConfiguration.destination` değeri **`azure-monitor`**
+olarak ayarlandı (bkz. `modules/containerAppsEnvironment.bicep`), **`none`** değil.
+
+- **Neden değişti:** `'none'` değeri Bicep'in statik tip kontrolünden geçiyordu, ancak
+  **gerçek `Microsoft.App/managedEnvironments` (2024-03-01) resource provider'ı**, Poland
+  Central'da canlı bir `--validation-level Provider` what-if önizlemesi sırasında bunu
+  reddetti: *"App Logs destination 'none' not supported. Supported values: 'log-analytics',
+  'azure-monitor'."*
+- **`azure-monitor` yalnızca bir routing modudur** — `'log-analytics'`'in aksine (ki o bir Log
+  Analytics workspace + `customerId`/`sharedKey` gerektirir), hiçbir ek workspace, diagnostic
+  setting veya Application Insights kaynağı **gerektirmez** ve bu şablonda hiçbiri
+  oluşturulmuyor.
+- **Bu "kesin sıfır maliyet" garantisi DEĞİLDİR** — yalnızca ücretli, kalıcı bir log depolama
+  kaynağının (workspace) burada oluşturulmadığı anlamına gelir.
+- Staging sırasında gerektiğinde gerçek zamanlı log stream kullanılabilir:
+  ```
+  az containerapp logs show --resource-group rg-repopulse-staging --name ca-repopulse-authapi-staging --follow
+  ```
+- Sonradan kalıcı bir log hedefi (Log Analytics workspace + diagnostic settings) eklemek,
+  **ayrı bir maliyet/güvenlik kararı** gerektirir — bu şablonun kapsamında değildir.
+
+## 4. Ön koşullar (elle, sırayla)
+
+1. Azure portalında kalan Azure for Students kredisini ve bitiş tarihini tekrar kontrol edin (bkz. §2).
+2. Bir Azure Budget/cost alert oluşturun (Azure portalı üzerinden "Cost Management + Billing"
+   → "Budgets" ile elle yapılır).
+3. İzin verilen deployment bölgelerini tekrar kontrol edin (bkz. §2'deki `az policy assignment
+   show` komutu).
+4. Aşağıdaki provider'ları kaydedin (**bu dokümanın son güncellendiği turda çalıştırılmadı**,
+   yalnızca referans komutlar — önceki bir turda bu üçü zaten kaydedilmişti):
 
    ```
    az provider register --namespace Microsoft.App
@@ -74,10 +115,10 @@
    az provider register --namespace Microsoft.ManagedIdentity
    ```
 
-   `Microsoft.ContainerRegistry` **kasıtlı olarak bu listede yok** — bu mimari ACR
-   kullanmıyor.
+   `Microsoft.ContainerRegistry` ve `Microsoft.OperationalInsights`/`Microsoft.Insights`
+   **kasıtlı olarak bu listede yok.**
 
-4. Kayıt durumunu doğrulayın:
+5. Kayıt durumunu doğrulayın:
 
    ```
    az provider show --namespace Microsoft.App --query registrationState -o tsv
@@ -85,151 +126,171 @@
    az provider show --namespace Microsoft.ManagedIdentity --query registrationState -o tsv
    ```
 
-5. `infra/azure/main.example.bicepparam` dosyasını `infra/azure/main.bicepparam` olarak
+6. `infra/azure/main.example.bicepparam` dosyasını `infra/azure/main.bicepparam` olarak
    kopyalayın (bu dosya `.gitignore`'da — asla commit etmeyin) ve gerçek `tenantId` ile
-   benzersiz bir `keyVaultName` girin. `containerImageDigest` alanını henüz **doldurmayın** —
-   bu, GHCR'a gerçek bir image push edildikten sonra, registry'nin döndürdüğü gerçek
-   `sha256:<64 hex karakter>` digest'i ile doldurulacak (bkz. §4). Bu bir etiket (tag) değil,
-   digest'tir — `latest` gibi bir değer buraya asla girilemez, çünkü parametre uzunluğu tam
-   71 karaktere (`sha256:` + 64 hex karakter) sabitlenmiştir.
+   benzersiz bir `keyVaultName` girin.
+7. `infra/azure/app.example.bicepparam` dosyasını `infra/azure/app.bicepparam` olarak
+   kopyalayın (bu dosya da `.gitignore`'da). `containerImageDigest` alanını henüz
+   **doldurmayın** — bu, GHCR'a gerçek bir image push edildikten sonra, registry'nin
+   döndürdüğü gerçek `sha256:<64 hex karakter>` digest'i ile doldurulacak (bkz. §6).
 
-## 3. Bicep doğrulama (deployment değildir, Azure'a bağlanmaz)
+## 5. Bicep doğrulama (deployment değildir, Azure'a bağlanmaz)
 
 ```
 az bicep build --file infra/azure/main.bicep
+az bicep build --file infra/azure/app.bicep
 az bicep build --file infra/azure/modules/containerAppsEnvironment.bicep
 az bicep build --file infra/azure/modules/keyVault.bicep
+az bicep build --file infra/azure/modules/userAssignedIdentity.bicep
 az bicep build --file infra/azure/modules/containerApp.bicep
 az bicep build --file infra/azure/modules/keyVaultAccess.bicep
 ```
 
 Bunlar yalnızca yerel derleme/söz dizimi kontrolüdür — hiçbir Azure kaynağına dokunmaz,
-kimlik doğrulaması gerektirmez. CI'da da otomatik çalışıyor (bkz.
-`.github/workflows/bicep-validate.yml`).
+kimlik doğrulaması gerektirmez, ve **gerçek resource provider'ın canlı doğrulamasını temsil
+etmez** (bkz. §3'teki `'none'`/`'azure-monitor'` deneyimi — Bicep build'in geçmesi yalnızca
+sözdizimi doğrulamasıdır, gerçek deployment başarısının garantisi değildir). CI'da da otomatik
+çalışıyor (bkz. `.github/workflows/bicep-validate.yml`).
 
-## 4. GHCR image'ını hazırlama (bu runbook'un kapsamı dışında, ayrı bir görev)
+## 6. GHCR image'ını hazırlama
 
 Bu Bicep şablonu, `ghcr.io/mustafanazli/repopulse-authapi` reposunu (bu repo adı
-`modules/containerApp.bicep` içinde sabittir, bir parametre değildir) yalnızca **image
-digest'i ile** (`@sha256:<64 hex karakter>`) adresler — hiçbir etiket (tag) kabul edilmez.
-Image'ın gerçekten GHCR'a push edilmesi, mevcut
-`.github/workflows/authapi-container-build.yml` CI job'unun kapsamı dışındadır (o job
-yalnızca build eder, push etmez — bkz. o dosyanın kendi yorumları). GHCR'a push eden bir
-workflow, **ayrı bir görev** olarak, ayrı bir onayla eklenmelidir. Push işlemi tamamlandıktan
-sonra, registry'nin döndürdüğü **gerçek digest değeri** (ör. `docker push` çıktısındaki
-`digest: sha256:...` satırı, ya da GHCR'ın paket sayfasındaki/registry API'sindeki digest)
-alınıp `main.bicepparam`'daki `containerImageDigest` parametresine yazılmalıdır. **`latest`
-etiketi veya herhangi bir mutable (değişebilir) etiket bu tasarımda hiçbir şekilde
-kullanılamaz** — parametre yalnızca bir digest kabul eder, bir tag değil.
+`modules/containerApp.bicep` içinde sabittir) yalnızca **image digest'i ile**
+(`@sha256:<64 hex karakter>`) adresler — hiçbir etiket (tag) kabul edilmez. Image'ı GHCR'a
+push etmek için `.github/workflows/authapi-publish-ghcr.yml` (yalnızca `workflow_dispatch`,
+yalnızca `main`) kullanılır. Push sonrası, workflow'un job summary'sinde yazan **gerçek
+digest değeri** alınıp `app.bicepparam`'daki `containerImageDigest` parametresine
+yazılmalıdır. **`latest` etiketi veya herhangi bir mutable etiket bu tasarımda hiçbir
+şekilde kullanılamaz.**
 
-## 5. Deployment adımları (Faz A: bootstrap altyapı — bu turda ÇALIŞTIRILMADI)
+**Güncel durum:** `authapi-publish-ghcr.yml` bir kez, manuel olarak, `main`'den dispatch
+edildi (run #32623102931, sonuç: success). Gerçek bir immutable digest zaten mevcut;
+package public olarak doğrulandı (`docker logout` sonrası anonim `docker buildx imagetools
+inspect ghcr.io/mustafanazli/repopulse-authapi@<digest>` başarıyla manifest döndürdü — hiçbir
+kimlik doğrulaması olmadan). Bu adım için **yeniden bir push yapmaya gerek yok** — kalan tek
+iş, bu doğrulanmış gerçek digest'i `app.bicepparam`'a yazmaktır (bkz. §7, adım 6). **Tam
+digest değeri bu dokümana veya başka hiçbir tracked dosyaya yazılmaz** — yalnızca ilgili
+workflow run'ın job summary'sinde ve yerel, gitignored `app.bicepparam` içinde bulunur.
 
-Yalnızca §2 ve §4 tamamlandıktan, ve siz Azure portalında kredi/bütçe durumunu son kez
-kontrol ettikten **sonra**, aşağıdaki komutlar sırayla çalıştırılabilir. Önce `what-if` ile
-önizleme, ardından gerçek deployment:
+## 7. Deployment sırası (kesin sıra)
 
-```
-az deployment sub what-if \
-  --location westeurope \
-  --template-file infra/azure/main.bicep \
-  --parameters infra/azure/main.bicepparam
-
-az deployment sub create \
-  --location westeurope \
-  --template-file infra/azure/main.bicep \
-  --parameters infra/azure/main.bicepparam
-```
-
-**Bu, Faz A'dır — yalnızca bootstrap altyapıyı (resource group, Container Apps environment,
-boş Key Vault, `GitHubOAuth__ClientSecret` olmadan Container App, ve Container App'in
-kimliğine Key Vault Secrets User rolü) oluşturur.** Container App bu noktada `ClientSecret`
-eksik olduğu için **başlatılamayacak ve crash-loop'a girecektir** — bu, `Program.cs`'teki
-`GitHubOAuthOptionsValidator.ValidateOnStart()`'ın kasıtlı "fail fast" davranışıdır, bir hata
-değildir. Faz B tamamlanana kadar bu beklenen bir durumdur.
-
-## 6. Deployment adımları (Faz B: secret bağlama — bu turda ÇALIŞTIRILMADI, elle yapılır)
-
-Bu faz, gerçek `client_secret` değerini içerdiği için **tamamen elle, yalnızca sizin
-tarafınızdan** yapılmalıdır — hiçbir agent/asistan bu değeri görmemeli/taşımamalıdır.
-
-1. Gerçek GitHub OAuth `client_secret` değerini Key Vault'a ekleyin:
+1. **Portal kredi/bitiş kontrolü** — bkz. §2.
+2. **Faz A what-if** (yalnızca önizleme, Azure'a hiçbir kaynak yazmaz):
 
    ```
-   az keyvault secret set \
-     --vault-name <KEY_VAULT_NAME> \
-     --name GitHubOAuth-ClientSecret \
-     --value "<GERÇEK DEĞERİ YALNIZCA BURADA, TERMİNALDE, ELLE GİRİN>"
+   az deployment sub what-if \
+     --name repopulse-staging-preview \
+     --location <IZINLI_BOLGE> \
+     --template-file infra/azure/main.bicep \
+     --parameters infra/azure/main.bicepparam \
+     --result-format ResourceIdOnly \
+     --validation-level Provider \
+     --no-prompt true \
+     --only-show-errors
    ```
 
-2. Container App'e bu secret'ı bir Container Apps secret reference olarak bağlayın ve
-   `GitHubOAuth__ClientSecret` ortam değişkenini buna işaret edecek şekilde güncelleyin:
+3. **Kullanıcı onayıyla Faz A deployment:**
 
    ```
-   az containerapp secret set \
+   az deployment sub create \
+     --name repopulse-staging \
+     --location <IZINLI_BOLGE> \
+     --template-file infra/azure/main.bicep \
+     --parameters infra/azure/main.bicepparam
+   ```
+
+4. **Identity ve Key Vault rolünü doğrulayın** (salt-okunur):
+
+   ```
+   az identity show --resource-group rg-repopulse-staging --name id-repopulse-authapi-staging --query principalId -o tsv
+   az role assignment list --scope <KEY_VAULT_RESOURCE_ID> --query "[].roleDefinitionName" -o tsv
+   ```
+
+   `"Key Vault Secrets User"` rolünün listede olduğunu doğrulayın.
+
+5. **Kullanıcı, gerçek `client_secret` değerini hiçbir agent/asistan görmeden Key Vault'a elle
+   ekler** — bkz. §8. **Hiçbir agent bu adımı sizin yerinize çalıştırmamalı veya değeri
+   görmemelidir.**
+
+6. **Secret metadata varlığını, değeri okumadan doğrulayın:**
+
+   ```
+   az keyvault secret list --vault-name <KEY_VAULT_NAME> --query "[].name" -o tsv
+   az keyvault secret show --vault-name <KEY_VAULT_NAME> --name github-oauth-client-secret --query "attributes" -o json
+   ```
+
+   Bu komutlar yalnızca secret'ın **var olduğunu ve ne zaman oluşturulduğunu** gösterir —
+   `--query value` **asla kullanılmamalıdır.**
+
+7. **Faz B what-if:**
+
+   ```
+   az deployment group what-if \
      --resource-group rg-repopulse-staging \
-     --name ca-repopulse-authapi-staging \
-     --secrets github-oauth-client-secret=keyvaultref:<KEY_VAULT_SECRET_URI>,identityref:system
-
-   az containerapp update \
-     --resource-group rg-repopulse-staging \
-     --name ca-repopulse-authapi-staging \
-     --set-env-vars GitHubOAuth__ClientSecret=secretref:github-oauth-client-secret
+     --name repopulse-app-preview \
+     --template-file infra/azure/app.bicep \
+     --parameters infra/azure/app.bicepparam \
+     --result-format ResourceIdOnly \
+     --no-prompt true \
+     --only-show-errors
    ```
 
-3. `https://<containerAppFqdn>/health` → `200 {"status":"healthy"}` olduğunu doğrulayın.
+8. **Kullanıcı onayıyla Faz B deployment:**
 
-## 7. 🛑 Rate-limit / client-IP staging testi (production trafiği açmadan ÖNCE zorunlu)
+   ```
+   az deployment group create \
+     --resource-group rg-repopulse-staging \
+     --name repopulse-app \
+     --template-file infra/azure/app.bicep \
+     --parameters infra/azure/app.bicepparam
+   ```
 
-Bu test, [ADR-004](../adr/004-production-hosting.md)'te işaretlenen **production deployment
-blocker**'ı gidermek için gereklidir. **Gerçek IP değerleri, token, code, verifier veya
-secret hiçbir noktada log'a veya rapora yazılmamalıdır** — yalnızca "beklenen davranış
-gözlendi/gözlenmedi" şeklinde bir sonuç kaydedilir.
+9. **`/health` doğrulaması ve rate-limit staging testleri** — bkz. §10.
+10. **Kontrollü cleanup** — bkz. §9.
 
-1. Bir ağdan (ör. ev Wi-Fi'ı), `POST /oauth/github/exchange` uç noktasına art arda geçersiz
-   (fakat biçimsel olarak geçerli) istekler göndererek rate limit'in ne zaman devreye
-   girdiğini (kaçıncı istekte `429 rate_limited` döndüğünü) gözlemleyin — yalnızca **istek
-   sayısını ve dönen durum kodunu** kaydedin, gönderilen IP'yi değil.
-2. **Bağımsız, ikinci bir ağdan** (ör. telefonun mobil veri bağlantısı, ev Wi-Fi'ı değil)
-   aynı testi tekrarlayın.
-3. **Eğer ikinci ağ, birinci ağın rate limit kotasını paylaşmıyorsa** (yani ikinci ağdan
-   gelen istekler kendi bağımsız limitine sahipse): partition ayrımı, staging ortamında
-   beklendiği gibi çalışıyor demektir.
-4. **Eğer iki ağ aynı kotayı paylaşıyorsa** (ör. birinci ağ limite ulaştıktan hemen sonra
-   ikinci ağdan gelen ilk istek de doğrudan `429` alıyorsa): bu, Container Apps ingress'i
-   arkasında `RemoteIpAddress`'in gerçek istemci IP'si yerine proxy'nin kendi IP'sini
-   gördüğünü doğrular — **production deployment blocker'ı hâlâ geçerlidir, kod
-   değiştirilmeden production trafiği açılmamalıdır.**
-5. Bu testin sonucu (yalnızca "ayrıştı" / "ayrışmadı" sonucu, hiçbir ham IP/istek detayı
-   olmadan) ADR-004'e bir güncelleme olarak eklenmelidir.
-6. **Bu test tamamlanıp sonucu belgelenmeden production trafiği bu backend'e açılmamalıdır.**
+**Faz B, Faz A'nın identity/rol ataması tamamlanmadan ve gerçek secret Key Vault'ta
+mevcut olmadan ASLA çalıştırılmamalıdır.**
 
-## 8. Cleanup (kredi bitmeden kaynakları kaldırma — bu turda ÇALIŞTIRILMADI)
+## 8. Gerçek secret'ı Key Vault'a ekleme — yalnızca portal üzerinden, elle
+
+Gerçek `client_secret` değerini **komut satırı geçmişine hiçbir zaman yazdırmayın** —
+`az keyvault secret set --value "..."` gibi bir komut, değeri shell history'sine (ör.
+`.bash_history`) kaydeder. Bunun yerine:
+
+1. [Azure Portal](https://portal.azure.com) → Key Vault kaynağınız (`<KEY_VAULT_NAME>`) →
+   sol menüden **"Objects" → "Secrets"** → **"+ Generate/Import"**.
+2. **Name:** `github-oauth-client-secret`
+3. **Secret value:** gerçek GitHub OAuth `client_secret` değerini buraya yapıştırın (yalnızca
+   tarayıcıda, hiçbir terminale/loga girmeden).
+4. **Create**'e tıklayın.
+
+Yalnızca CLI'ya erişiminiz yoksa ve portal kullanamıyorsanız, `az keyvault secret set`'i
+**değeri komuta doğrudan yazmadan**, güvenli bir okuma istemiyle çalıştırın (ör. bir terminal
+oturumunda `read -s SECRET_VALUE` ile değişkene okutup `--value "$SECRET_VALUE"` şeklinde
+kullanmak, ki bu da yalnızca değişkenin adını shell history'sine yazar, değerini değil) —
+ancak **portal yöntemi tercih edilen yöntemdir.**
+
+## 9. Cleanup (kredi bitmeden kaynakları kaldırma)
 
 Aşağıdaki komutlar **yalnızca bu runbook'un oluşturduğu `rg-repopulse-staging` kaynak
 grubunu** hedefler. **Bu abonelikte önceden var olan, RepoPulse ile ilgisiz
-`TranslatorAppGrubu` kaynak grubuna KESİNLİKLE dokunulmamalıdır** — aşağıdaki hiçbir komut
-onu hedeflemez ve elle çalıştırırken de hedeflenmemelidir.
+`TranslatorAppGrubu` kaynak grubuna KESİNLİKLE dokunulmamalıdır.**
 
 **Silme komutunu çalıştırmadan ÖNCE, sırayla, üç ayrı doğrulama yapın:**
 
-1. Doğru abonelikte olduğunuzu doğrulayın (birden fazla abonelikle çalışıyorsanız özellikle
-   önemli — yanlış abonelikte çalıştırılan bir `az group delete`, hedef adı doğru olsa bile
-   tamamen farklı bir ortamı silebilir):
+1. Doğru abonelikte olduğunuzu doğrulayın:
 
    ```
    az account show --query "{name:name, id:id}" -o table
    ```
 
-2. Hedef kaynak grubunun var olduğunu VE adının tam olarak `rg-repopulse-staging` olduğunu
-   doğrulayın:
+2. Hedef kaynak grubunun adının tam olarak `rg-repopulse-staging` olduğunu doğrulayın:
 
    ```
    az group show --name rg-repopulse-staging --query name -o tsv
    ```
 
-3. Silmeden önce bu kaynak grubunun içinde gerçekten NELERİN olduğunu görün — beklemediğiniz
-   bir kaynak varsa (ör. yanlışlıkla başka bir projenin kaynağı buraya eklenmişse) durun ve
-   araştırın, silme komutunu çalıştırmayın:
+3. Silmeden önce içeriği görün:
 
    ```
    az resource list --resource-group rg-repopulse-staging -o table
@@ -242,18 +303,37 @@ Yalnızca yukarıdaki üç adım da beklenen sonucu verdikten sonra silme komutu
 az group delete --name rg-repopulse-staging --yes --no-wait
 ```
 
-## 9. Özet: gerçek deployment öncesi açık kullanıcı onayları
+## 10. 🛑 Rate-limit / client-IP staging testi (production trafiği açmadan ÖNCE zorunlu)
 
-Bu turda kod olarak hazırlanan bu altyapı, aşağıdakiler **siz tarafından, açıkça**
-onaylanmadan/yapılmadan gerçek bir Azure kaynağına dönüşmeyecektir:
+Bu test, [ADR-004](../adr/004-production-hosting.md)'te işaretlenen **production deployment
+blocker**'ı gidermek için gereklidir. **Gerçek IP değerleri, token, code, verifier veya
+secret hiçbir noktada log'a veya rapora yazılmamalıdır.**
+
+1. Bir ağdan (ör. ev Wi-Fi'ı), `POST /oauth/github/exchange` uç noktasına art arda geçersiz
+   (fakat biçimsel olarak geçerli) istekler göndererek rate limit'in kaçıncı istekte
+   `429 rate_limited` döndüğünü gözlemleyin — yalnızca **istek sayısını ve durum kodunu**
+   kaydedin.
+2. **Bağımsız, ikinci bir ağdan** (ör. telefonun mobil veri bağlantısı) aynı testi tekrarlayın.
+3. **İkinci ağ kendi bağımsız limitine sahipse:** partition ayrımı beklendiği gibi çalışıyor.
+4. **İki ağ aynı kotayı paylaşıyorsa:** production deployment blocker'ı hâlâ geçerlidir, kod
+   değiştirilmeden production trafiği açılmamalıdır.
+5. Sonuç (yalnızca "ayrıştı" / "ayrışmadı", ham detay olmadan) ADR-004'e eklenmelidir.
+6. **Bu test tamamlanıp sonucu belgelenmeden production trafiği açılmamalıdır.**
+
+## 11. Özet: gerçek deployment öncesi açık kullanıcı onayları
 
 - [ ] Azure portalında kalan kredi/bitiş tarihinin son kez kontrolü
 - [ ] Bir Azure Budget/cost alert'in oluşturulması
-- [ ] `Microsoft.App`, `Microsoft.KeyVault`, `Microsoft.ManagedIdentity` provider'larının
-      kaydedilmesi onayı
-- [ ] Gerçek bir GHCR image'ının build edilip push edilmesi (ayrı görev)
-- [ ] `infra/azure/main.bicepparam`'ın gerçek değerlerle doldurulması
-- [ ] Faz A bootstrap deployment'ının (`az deployment sub create`) çalıştırılması onayı
-- [ ] Faz B secret bağlama adımlarının elle tamamlanması
-- [ ] §7'deki rate-limit/client-IP staging testinin tamamlanması ve sonucunun belgelenmesi
+- [ ] İzin verilen deployment bölgelerinin (`sys.regionrestriction`) tekrar kontrolü
+- [ ] Faz A what-if'in incelenmesi ve onaylanması
+- [ ] Faz A deployment'ının (`az deployment sub create`) çalıştırılması onayı
+- [ ] Identity + Key Vault rolünün doğrulanması
+- [ ] Gerçek secret'ın portal üzerinden Key Vault'a elle eklenmesi
+- [ ] Secret metadata'sının (değeri değil) doğrulanması
+- [x] Gerçek bir GHCR image'ının build edilip push edilmesi ve digest'inin alınması —
+      **tamamlandı** (run #32623102931, public, anonim erişim doğrulandı)
+- [ ] `app.bicepparam`'ın bu doğrulanmış gerçek digest ile doldurulması
+- [ ] Faz B what-if'in incelenmesi ve onaylanması
+- [ ] Faz B deployment'ının (`az deployment group create`) çalıştırılması onayı
+- [ ] `/health` ve rate-limit/client-IP staging testinin tamamlanması ve belgelenmesi
 - [ ] Yalnızca yukarıdakilerin hepsi tamamlandıktan sonra production trafiğinin açılması

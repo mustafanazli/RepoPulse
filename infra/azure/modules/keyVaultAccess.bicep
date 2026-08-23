@@ -1,7 +1,7 @@
 @description('Name of an existing, already-deployed Key Vault to grant access on.')
 param keyVaultName string
 
-@description('Principal ID of the identity to grant access to — the Container App\'s system-assigned managed identity.')
+@description('Principal ID of the identity to grant access to — the user-assigned managed identity created in this same Phase A deployment (see modules/userAssignedIdentity.bicep), which the Container App created later in Phase B (infra/azure/app.bicep) will be assigned.')
 param principalId string
 
 // Built-in "Key Vault Secrets User" role definition ID. Read-only access

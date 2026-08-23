@@ -1,11 +1,17 @@
-@description('Azure region for the Container App.')
+@description('Azure region for the Container App. Must match the region used for the existing Container Apps environment (created in Phase A).')
 param location string
 
 @description('Name of the Container App.')
 param containerAppName string
 
-@description('Resource ID of the Container Apps managed environment this app runs in.')
+@description('Resource ID of the existing Container Apps managed environment (created in Phase A, infra/azure/main.bicep) this app runs in.')
 param containerAppsEnvironmentId string
+
+@description('Resource ID of the existing user-assigned managed identity (created in Phase A, already granted Key Vault Secrets User on the Key Vault) to assign to this Container App. NOT a system-assigned identity — see docs/adr/004-production-hosting.md for why this template no longer uses SystemAssigned.')
+param userAssignedIdentityId string
+
+@description('Name of the existing Key Vault (created in Phase A) that already contains the real GitHubOAuth client secret. This is an IDENTITY only — a plain Key Vault name, never a URL or a secret path. The caller cannot supply a different host or path: this module builds the exact secret URL itself, below, from this name and a fixed secret name.')
+param keyVaultName string
 
 @description('SHA-256 digest of the RepoPulse.AuthApi image already built and pushed to GHCR, in the exact format "sha256:<64 lowercase hex characters>". Obtain this from the real GHCR push output (the digest GHCR/`docker push` reports, or a registry API digest lookup) after the image has actually been pushed — never fabricate or guess this value. This parameter accepts ONLY a digest, never a tag: neither "latest" nor any mutable branch/commit tag can be expressed here at all, because the repository is fixed below and addressed exclusively by @<digest>.')
 @minLength(71)
@@ -39,15 +45,37 @@ var containerTargetPort = 8080
 var containerImageRepository = 'ghcr.io/mustafanazli/repopulse-authapi'
 var containerImage = '${containerImageRepository}@${containerImageDigest}'
 
+// Secret NAME is fixed in Bicep, not a parameter — no caller (bicepparam or
+// otherwise) can point this at a different secret name.
+var clientSecretName = 'github-oauth-client-secret'
+
+// The Key Vault secret URL is built entirely inside this module, from the
+// Key Vault's own canonical `vaultUri` property (via an `existing` lookup)
+// plus the fixed secret name above — never accepted as a free-form
+// parameter. `vaultUri` is used rather than manually assembling
+// `https://${keyVaultName}.vault.azure.net/` or
+// `environment().suffixes.keyvaultDns`: it is the vault resource's own,
+// always-correct URI, with no assumption about which Azure cloud
+// (Public/Government/China) this deploys into baked in here.
+resource keyVault 'Microsoft.KeyVault/vaults@2023-07-01' existing = {
+  name: keyVaultName
+}
+
+var clientSecretKeyVaultUrl = '${keyVault.properties.vaultUri}secrets/${clientSecretName}'
+
 resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   name: containerAppName
   location: location
   identity: {
-    // System-assigned only (no user-assigned identity) — its principalId
-    // becomes available only once this resource exists, which is why the
-    // Key Vault role assignment (modules/keyVaultAccess.bicep) is a
-    // separate module that depends on this one's output.
-    type: 'SystemAssigned'
+    // User-assigned only — NOT SystemAssigned. The identity already exists
+    // and already holds the Key Vault Secrets User role (both from Phase
+    // A) before this Container App is ever created, so there is no window
+    // where the app starts without an identity that can already resolve
+    // its Key Vault secret reference.
+    type: 'UserAssigned'
+    userAssignedIdentities: {
+      '${userAssignedIdentityId}': {}
+    }
   }
   properties: {
     managedEnvironmentId: containerAppsEnvironmentId
@@ -62,11 +90,19 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
         // src/RepoPulse.AuthApi/Program.cs and ADR-004).
         allowInsecure: false
       }
-      // Deliberately no `secrets` array here. The real GitHubOAuth
-      // ClientSecret is wired in a separate, later, manual step (see
-      // docs/deployment/azure-staging-runbook.md) once a human has placed
-      // it in Key Vault — this bootstrap template never embeds a
-      // placeholder or fake value for it.
+      // The only "secret" here is a Container Apps secret NAME plus a
+      // reference (Key Vault URL + identity to use to resolve it) — the
+      // actual secret VALUE is never present in this template, this
+      // deployment, or any Bicep output. The runbook requires the real
+      // value to already exist in Key Vault (added manually, by a human,
+      // out of band) before this Phase B deployment is ever run.
+      secrets: [
+        {
+          name: clientSecretName
+          keyVaultUrl: clientSecretKeyVaultUrl
+          identity: userAssignedIdentityId
+        }
+      ]
     }
     template: {
       containers: [
@@ -101,12 +137,13 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
               name: 'GitHubOAuth__TokenEndpoint'
               value: gitHubOAuthTokenEndpoint
             }
-            // GitHubOAuth__ClientSecret is intentionally absent. Until the
-            // separate secret-wiring step in the runbook is completed,
-            // GitHubOAuthOptionsValidator.ValidateOnStart() will correctly
-            // make the container fail to start — that fail-fast behavior
-            // is by design (see src/RepoPulse.AuthApi/Configuration), not
-            // a defect in this template.
+            {
+              // Bound via Container Apps secretRef, never a plain `value`
+              // — the actual secret text never appears in this template,
+              // this deployment's parameters, or any ARM/Bicep output.
+              name: 'GitHubOAuth__ClientSecret'
+              secretRef: clientSecretName
+            }
           ]
         }
       ]
@@ -118,6 +155,5 @@ resource containerApp 'Microsoft.App/containerApps@2024-03-01' = {
   }
 }
 
-output principalId string = containerApp.identity.principalId
 output name string = containerApp.name
 output fqdn string = containerApp.properties.configuration.ingress.fqdn
