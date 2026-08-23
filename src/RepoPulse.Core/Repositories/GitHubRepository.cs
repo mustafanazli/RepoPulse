@@ -11,7 +11,10 @@ public sealed record GitHubRepository(
     string HtmlUrl,
     int Stars,
     int Forks,
-    int OpenIssues,
+    // GitHub's own `open_issues_count` field counts open issues AND open
+    // pull requests together — the API does not separate them. Named to
+    // say so explicitly, rather than implying an issues-only count.
+    int OpenIssuesAndPullRequests,
     string? PrimaryLanguage,
     string DefaultBranch,
     bool IsArchived,

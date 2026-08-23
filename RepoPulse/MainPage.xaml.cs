@@ -307,7 +307,10 @@ namespace RepoPulse
             RepositoryDescriptionLabel.Text = string.IsNullOrWhiteSpace(repository.Description)
                 ? "Açıklama yok."
                 : repository.Description;
-            RepositoryStatsLabel.Text = $"{repository.Stars} yıldız · {repository.Forks} fork · {repository.OpenIssues} açık issue";
+            // GitHub's open_issues_count counts open issues AND open pull
+            // requests together — labeled accordingly so this isn't read as
+            // an issues-only count.
+            RepositoryStatsLabel.Text = $"{repository.Stars} yıldız · {repository.Forks} fork · {repository.OpenIssuesAndPullRequests} açık issue + PR";
             RepositoryLanguageLabel.Text = string.IsNullOrEmpty(repository.PrimaryLanguage)
                 ? "Ana dil belirtilmemiş"
                 : $"Ana dil: {repository.PrimaryLanguage}";

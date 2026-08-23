@@ -202,7 +202,7 @@ public class GitHubApiClientTests
         Assert.Equal("https://github.com/mustafanazli/RepoPulse", repository.HtmlUrl);
         Assert.Equal(42, repository.Stars);
         Assert.Equal(7, repository.Forks);
-        Assert.Equal(3, repository.OpenIssues);
+        Assert.Equal(3, repository.OpenIssuesAndPullRequests);
         Assert.Equal("C#", repository.PrimaryLanguage);
         Assert.Equal("main", repository.DefaultBranch);
         Assert.False(repository.IsArchived);
