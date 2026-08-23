@@ -5,7 +5,6 @@
 .vs
 .vscode
 .idea
-.claude
 
 # Build outputs — rebuilt from source inside the multi-stage build.
 **/bin
