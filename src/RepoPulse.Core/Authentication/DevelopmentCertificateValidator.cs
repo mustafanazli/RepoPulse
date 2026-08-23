@@ -18,6 +18,15 @@ public static class DevelopmentCertificateValidator
     private const string ExpectedSubject = "CN=localhost";
     private const string ExpectedIssuer = "CN=localhost";
 
+    // Single source of truth for "is this a local-development host" so the
+    // AuthApi HttpClient wiring in MauiProgram.cs can decide whether to
+    // attach this validator at all, without duplicating the host list. A
+    // live backend (e.g. the Azure staging address) is never one of these
+    // hosts, so it always falls through to ordinary platform TLS validation
+    // — see MauiProgram.CreateAuthApiHttpClient().
+    public static bool IsLocalDevelopmentHost(string? host) =>
+        host is not null && AllowedHosts.Contains(host, StringComparer.OrdinalIgnoreCase);
+
     public static bool ShouldAccept(HttpRequestMessage? request, X509Certificate2? certificate, X509Chain? chain, SslPolicyErrors sslPolicyErrors)
     {
         var host = request?.RequestUri?.Host;

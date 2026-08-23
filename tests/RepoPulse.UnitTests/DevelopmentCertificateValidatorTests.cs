@@ -97,4 +97,24 @@ public class DevelopmentCertificateValidatorTests
 
         Assert.False(accepted);
     }
+
+    [Theory]
+    [InlineData("10.0.2.2")]
+    [InlineData("localhost")]
+    [InlineData("127.0.0.1")]
+    [InlineData("LOCALHOST")]
+    public void IsLocalDevelopmentHost_KnownLocalHost_ReturnsTrue(string host)
+    {
+        Assert.True(DevelopmentCertificateValidator.IsLocalDevelopmentHost(host));
+    }
+
+    [Theory]
+    [InlineData("ca-repopulse-authapi-staging.orangefield-f1a16f03.polandcentral.azurecontainerapps.io")]
+    [InlineData("api.github.com")]
+    [InlineData("evil.example.com")]
+    [InlineData(null)]
+    public void IsLocalDevelopmentHost_NonLocalOrNullHost_ReturnsFalse(string? host)
+    {
+        Assert.False(DevelopmentCertificateValidator.IsLocalDevelopmentHost(host));
+    }
 }
