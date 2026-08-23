@@ -1,5 +1,6 @@
 using RepoPulse.Authentication;
 using RepoPulse.Core.Authentication;
+using RepoPulse.Core.Repositories;
 
 namespace RepoPulse
 {
@@ -12,13 +13,14 @@ namespace RepoPulse
         private readonly IGitHubApiClient gitHubApiClient;
         private readonly AuthorizationSessionStore sessionStore;
 
-        int count = 0;
         bool isSubscribedToOAuthCallbacks;
         bool isSignInInProgress;
+        bool isRepositoryLookupInProgress;
 
         // In-memory only, by design (RP-005) — never SecureStorage/SQLite/
         // Preferences/file. Lost on app restart; that is acceptable for now.
-        // Not used for anything yet (no refresh flow implemented).
+        // currentAccessToken is also used for the repository lookup call
+        // (RP-006) — still never persisted anywhere beyond this field.
         private string? currentAccessToken;
         private string? currentRefreshToken;
 
@@ -56,18 +58,6 @@ namespace RepoPulse
                 OAuthCallbackBroker.CallbackReceived -= OnOAuthCallbackReceived;
                 isSubscribedToOAuthCallbacks = false;
             }
-        }
-
-        private void OnCounterClicked(object? sender, EventArgs e)
-        {
-            count++;
-
-            if (count == 1)
-                CounterBtn.Text = $"Clicked {count} time";
-            else
-                CounterBtn.Text = $"Clicked {count} times";
-
-            SemanticScreenReader.Announce(CounterBtn.Text);
         }
 
         private async void OnSignInClicked(object? sender, EventArgs e)
@@ -108,8 +98,8 @@ namespace RepoPulse
             }
         }
 
-        // Dev-only status text for RP-002/RP-003 callback verification. Deliberately
-        // never displays the actual code/state/error_description/token values.
+        // Deliberately never displays the actual code/state/error_description/
+        // token values — only short, safe, user-facing status text.
         private async void OnOAuthCallbackReceived(object? sender, OAuthCallbackResult result)
         {
             switch (result.Outcome)
@@ -120,14 +110,14 @@ namespace RepoPulse
 
                 case OAuthCallbackOutcome.Cancelled:
                     sessionStore.Reset();
-                    SetStatus("Kullanıcı iptal etti");
+                    SetStatus("Giriş iptal edildi.");
                     EndSignInAttempt();
                     break;
 
                 case OAuthCallbackOutcome.Invalid:
                 default:
                     sessionStore.Reset();
-                    SetStatus("Geçersiz callback");
+                    SetStatus("Giriş isteği doğrulanamadı, lütfen tekrar deneyin.");
                     EndSignInAttempt();
                     break;
             }
@@ -139,7 +129,7 @@ namespace RepoPulse
             {
                 // Wrong/missing/expired/already-used state: never send the token
                 // request for a callback we cannot attribute to our own session.
-                SetStatus("Geçersiz callback");
+                SetStatus("Giriş isteği doğrulanamadı, lütfen tekrar deneyin.");
                 EndSignInAttempt();
                 return;
             }
@@ -167,7 +157,6 @@ namespace RepoPulse
                 return;
             }
 
-            SetStatus("Callback alındı");
             SetSignedInUi(userResult.User);
             EndSignInAttempt();
         }
@@ -196,20 +185,28 @@ namespace RepoPulse
         }
 
         private void SetStatus(string statusText) =>
-            MainThread.BeginInvokeOnMainThread(() => OAuthCallbackStatusLabel.Text = statusText);
+            MainThread.BeginInvokeOnMainThread(() =>
+            {
+                OAuthCallbackStatusLabel.Text = statusText;
+                OAuthCallbackStatusLabel.IsVisible = true;
+            });
 
         private void SetSignedInUi(GitHubUser user)
         {
             MainThread.BeginInvokeOnMainThread(() =>
             {
-                GitHubLoginLabel.Text = $"Giriş yapan: @{user.Login}";
-                GitHubLoginLabel.IsVisible = true;
+                OAuthCallbackStatusLabel.IsVisible = false;
+                SignInButton.IsVisible = false;
+
+                GitHubLoginLabel.Text = $"@{user.Login}";
+                SignedInHeader.IsVisible = true;
 
                 if (!string.IsNullOrEmpty(user.AvatarUrl))
                 {
                     GitHubAvatarImage.Source = user.AvatarUrl;
-                    GitHubAvatarImage.IsVisible = true;
                 }
+
+                RepositoryLookupSection.IsVisible = true;
             });
         }
 
@@ -217,9 +214,129 @@ namespace RepoPulse
         {
             MainThread.BeginInvokeOnMainThread(() =>
             {
-                GitHubLoginLabel.IsVisible = false;
-                GitHubAvatarImage.IsVisible = false;
+                SignInButton.IsVisible = true;
+                SignedInHeader.IsVisible = false;
+                RepositoryLookupSection.IsVisible = false;
+                ClearRepositoryResult();
             });
+        }
+
+        // --- Repository lookup (RP-006) ---
+
+        private async void OnLookupRepositoryClicked(object? sender, EventArgs e)
+        {
+            if (isRepositoryLookupInProgress)
+            {
+                // A lookup is already in flight — a double-tap must never
+                // start a second concurrent request.
+                return;
+            }
+
+            var parseResult = RepositoryIdentifierParser.Parse(RepositoryInput.Text);
+            if (!parseResult.IsSuccess || parseResult.Value is null)
+            {
+                SetRepositoryError(parseResult.SafeErrorMessage ?? "Repository adı geçersiz.");
+                return;
+            }
+
+            if (currentAccessToken is null)
+            {
+                SetRepositoryError("Önce GitHub ile giriş yapmalısınız.");
+                return;
+            }
+
+            isRepositoryLookupInProgress = true;
+            LookupButton.IsEnabled = false;
+            SetRepositoryLoading();
+
+            using var cts = new CancellationTokenSource(RequestTimeout);
+            var repositoryResult = await gitHubApiClient.GetRepositoryAsync(
+                currentAccessToken,
+                parseResult.Value.Owner,
+                parseResult.Value.Name,
+                cts.Token);
+
+            isRepositoryLookupInProgress = false;
+            LookupButton.IsEnabled = true;
+
+            if (!repositoryResult.IsSuccess || repositoryResult.Repository is null)
+            {
+                SetRepositoryError(DescribeRepositoryFailure(repositoryResult.FailureKind));
+                return;
+            }
+
+            SetRepositoryResult(repositoryResult.Repository);
+        }
+
+        // Maps the typed failure kind to a short, safe Turkish message —
+        // never a raw GitHub response body.
+        private static string DescribeRepositoryFailure(GitHubRepositoryFailureKind? kind) => kind switch
+        {
+            GitHubRepositoryFailureKind.NotFound => "Repository bulunamadı.",
+            GitHubRepositoryFailureKind.Unauthorized => "Oturumunuz geçersiz, lütfen tekrar giriş yapın.",
+            GitHubRepositoryFailureKind.RateLimited => "GitHub istek sınırına ulaşıldı, biraz sonra tekrar deneyin.",
+            GitHubRepositoryFailureKind.NetworkError => "GitHub'a ulaşılamadı.",
+            _ => "Repository bilgileri alınamadı."
+        };
+
+        private void SetRepositoryLoading()
+        {
+            RepositoryErrorLabel.IsVisible = false;
+            RepositoryCard.IsVisible = false;
+            RepositoryLoadingIndicator.IsVisible = true;
+            RepositoryLoadingIndicator.IsRunning = true;
+        }
+
+        private void SetRepositoryError(string message)
+        {
+            RepositoryLoadingIndicator.IsRunning = false;
+            RepositoryLoadingIndicator.IsVisible = false;
+            RepositoryCard.IsVisible = false;
+            RepositoryErrorLabel.Text = message;
+            RepositoryErrorLabel.IsVisible = true;
+            SemanticScreenReader.Announce(message);
+        }
+
+        private void SetRepositoryResult(GitHubRepository repository)
+        {
+            RepositoryLoadingIndicator.IsRunning = false;
+            RepositoryLoadingIndicator.IsVisible = false;
+            RepositoryErrorLabel.IsVisible = false;
+
+            RepositoryFullNameLabel.Text = repository.FullName;
+            RepositoryDescriptionLabel.Text = string.IsNullOrWhiteSpace(repository.Description)
+                ? "Açıklama yok."
+                : repository.Description;
+            RepositoryStatsLabel.Text = $"{repository.Stars} yıldız · {repository.Forks} fork · {repository.OpenIssues} açık issue";
+            RepositoryLanguageLabel.Text = string.IsNullOrEmpty(repository.PrimaryLanguage)
+                ? "Ana dil belirtilmemiş"
+                : $"Ana dil: {repository.PrimaryLanguage}";
+            RepositoryUpdatedLabel.Text = repository.UpdatedAt is { } updatedAt
+                ? $"Son güncelleme: {updatedAt.ToLocalTime():dd.MM.yyyy}"
+                : "Son güncelleme bilgisi yok";
+
+            var badges = new List<string>();
+            if (repository.IsArchived)
+            {
+                badges.Add("Arşivlenmiş");
+            }
+            if (repository.IsFork)
+            {
+                badges.Add("Fork");
+            }
+
+            RepositoryBadgesLabel.Text = string.Join(" · ", badges);
+            RepositoryBadgesLabel.IsVisible = badges.Count > 0;
+
+            RepositoryCard.IsVisible = true;
+        }
+
+        private void ClearRepositoryResult()
+        {
+            RepositoryLoadingIndicator.IsRunning = false;
+            RepositoryLoadingIndicator.IsVisible = false;
+            RepositoryErrorLabel.IsVisible = false;
+            RepositoryCard.IsVisible = false;
         }
     }
 }

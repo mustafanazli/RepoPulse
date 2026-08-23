@@ -16,4 +16,10 @@ public static class OAuthConstants
     // talks to our own backend instead, which holds the client_secret.
     public const string AuthorizeEndpoint = "https://github.com/login/oauth/authorize";
     public const string UserEndpoint = "https://api.github.com/user";
+
+    // Base address for repository lookups (RP-006) — GitHubApiClient appends
+    // /{owner}/{repository}, both percent-encoded. See
+    // RepoPulse.Core.Repositories.RepositoryIdentifierParser for the only
+    // place user input is turned into these two path segments.
+    public const string RepositoryEndpointBase = "https://api.github.com/repos";
 }
