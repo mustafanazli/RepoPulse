@@ -172,6 +172,21 @@ public class RepoPulseAuthApiClientTests
     }
 
     [Fact]
+    public async Task ExchangeAsync_WebException_ReturnsNetworkErrorSafely()
+    {
+        // Reproduces a real crash found via Android emulator testing (RP-006
+        // verification): Xamarin.Android's HTTP handler can surface a raw
+        // socket failure as WebException instead of HttpRequestException.
+        var handler = new ThrowingHttpMessageHandler(new WebException("Socket closed"));
+        var client = new RepoPulseAuthApiClient(new HttpClient(handler) { BaseAddress = new Uri("https://localhost:7082") });
+
+        var result = await client.ExchangeAsync("code", "verifier", CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(AuthApiExchangeFailureKind.NetworkError, result.FailureKind);
+    }
+
+    [Fact]
     public async Task ExchangeAsync_DoesNotRetry_CallsHandlerExactlyOnce()
     {
         var callCount = 0;

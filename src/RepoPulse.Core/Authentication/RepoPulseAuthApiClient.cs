@@ -57,6 +57,17 @@ public sealed class RepoPulseAuthApiClient : IRepoPulseAuthApiClient
         {
             return AuthApiExchangeResult.Failure(AuthApiExchangeFailureKind.NetworkError);
         }
+        // Discovered via a real Android emulator run (RP-006 verification):
+        // Xamarin.Android's HTTP handler can surface a raw socket failure
+        // (e.g. "Socket closed") as System.Net.WebException instead of
+        // wrapping it in HttpRequestException. Uncaught, this crashed the
+        // app (OnOAuthCallbackReceived is `async void`, so any unhandled
+        // exception here takes down the process). Same treatment as
+        // HttpRequestException: a safe, typed NetworkError result.
+        catch (WebException)
+        {
+            return AuthApiExchangeResult.Failure(AuthApiExchangeFailureKind.NetworkError);
+        }
 
         if (statusCode == HttpStatusCode.OK)
         {
