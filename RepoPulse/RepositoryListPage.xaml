@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="RepoPulse.RepositoryListPage"
+             Title="Repositories">
+
+    <ContentPage.ToolbarItems>
+        <ToolbarItem
+            Text="Ayarlar"
+            Clicked="OnSettingsClicked"
+            Order="Primary" />
+    </ContentPage.ToolbarItems>
+
+    <ScrollView>
+        <VerticalStackLayout
+            Padding="30,20"
+            Spacing="20">
+
+            <Label
+                Text="Repository Ara"
+                Style="{StaticResource Headline}"
+                SemanticProperties.HeadingLevel="Level1" />
+
+            <Entry
+                x:Name="RepositoryInput"
+                Placeholder="owner/repository"
+                SemanticProperties.Hint="Aranacak GitHub repository adını owner/repository biçiminde girin" />
+
+            <Button
+                x:Name="LookupButton"
+                Text="Repository'yi Getir"
+                Clicked="OnLookupRepositoryClicked"
+                SemanticProperties.Hint="Girilen repository bilgilerini GitHub'dan getirir"
+                HorizontalOptions="Fill" />
+
+            <ActivityIndicator
+                x:Name="RepositoryLoadingIndicator"
+                IsRunning="False"
+                IsVisible="False"
+                SemanticProperties.Description="Repository bilgileri yükleniyor" />
+
+            <Label
+                x:Name="RepositoryErrorLabel"
+                IsVisible="False"
+                TextColor="{AppThemeBinding Light=Crimson, Dark=OrangeRed}"
+                SemanticProperties.Description="Repository arama hatası" />
+
+            <Border
+                x:Name="RepositoryCard"
+                IsVisible="False"
+                Padding="16"
+                StrokeShape="RoundRectangle 12">
+                <VerticalStackLayout Spacing="6">
+                    <Label
+                        x:Name="RepositoryFullNameLabel"
+                        FontAttributes="Bold"
+                        FontSize="18"
+                        SemanticProperties.HeadingLevel="Level2" />
+                    <Label x:Name="RepositoryStatsLabel" />
+                    <Button
+                        x:Name="ViewDetailButton"
+                        Text="Detayları Gör"
+                        Clicked="OnViewDetailClicked"
+                        SemanticProperties.Hint="Bu repository'nin tüm ayrıntılarını gösterir"
+                        HorizontalOptions="Fill" />
+                </VerticalStackLayout>
+            </Border>
+
+        </VerticalStackLayout>
+    </ScrollView>
+
+</ContentPage>

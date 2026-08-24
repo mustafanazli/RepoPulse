@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="RepoPulse.LoginPage"
+             Title="Giriş"
+             Shell.NavBarIsVisible="False">
+
+    <ScrollView>
+        <VerticalStackLayout
+            Padding="30,40"
+            Spacing="20"
+            VerticalOptions="Center">
+
+            <Label
+                Text="RepoPulse"
+                Style="{StaticResource Headline}"
+                SemanticProperties.HeadingLevel="Level1" />
+
+            <Button
+                x:Name="SignInButton"
+                Text="GitHub ile giriş yap"
+                Clicked="OnSignInClicked"
+                SemanticProperties.Hint="GitHub hesabınızla giriş yapmak için tarayıcıyı açar"
+                HorizontalOptions="Fill" />
+
+            <Label
+                x:Name="StatusLabel"
+                IsVisible="False"
+                HorizontalTextAlignment="Center"
+                SemanticProperties.Description="Giriş durumu" />
+
+        </VerticalStackLayout>
+    </ScrollView>
+
+</ContentPage>

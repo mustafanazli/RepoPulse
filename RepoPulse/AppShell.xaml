@@ -4,11 +4,19 @@
     xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
     xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
     xmlns:local="clr-namespace:RepoPulse"
-    Title="RepoPulse">
+    xmlns:nav="clr-namespace:RepoPulse.Core.Navigation;assembly=RepoPulse.Core"
+    Title="RepoPulse"
+    FlyoutBehavior="Disabled">
 
     <ShellContent
-        Title="Home"
-        ContentTemplate="{DataTemplate local:MainPage}"
-        Route="MainPage" />
+        x:Name="LoginContent"
+        Title="Giriş"
+        ContentTemplate="{DataTemplate local:LoginPage}"
+        Route="{x:Static nav:AppRoutes.Login}" />
+
+    <ShellContent
+        Title="Repositories"
+        ContentTemplate="{DataTemplate local:RepositoryListPage}"
+        Route="{x:Static nav:AppRoutes.RepositoryList}" />
 
 </Shell>

@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="RepoPulse.RepositoryDetailPage"
+             Title="Repository Detayı">
+
+    <ScrollView>
+        <VerticalStackLayout
+            Padding="30,20"
+            Spacing="10">
+
+            <Label
+                x:Name="RepositoryFullNameLabel"
+                FontAttributes="Bold"
+                FontSize="22"
+                SemanticProperties.HeadingLevel="Level1" />
+
+            <Label
+                x:Name="RepositoryDescriptionLabel" />
+
+            <Label
+                x:Name="RepositoryStatsLabel" />
+
+            <Label
+                x:Name="RepositoryLanguageLabel" />
+
+            <Label
+                x:Name="RepositoryDefaultBranchLabel" />
+
+            <Label
+                x:Name="RepositoryUpdatedLabel" />
+
+            <Label
+                x:Name="RepositoryPushedLabel" />
+
+            <Label
+                x:Name="RepositoryBadgesLabel"
+                IsVisible="False"
+                FontAttributes="Italic" />
+
+            <Label
+                x:Name="RepositoryUrlLabel"
+                SemanticProperties.Hint="Repository'nin GitHub adresi" />
+
+        </VerticalStackLayout>
+    </ScrollView>
+
+</ContentPage>

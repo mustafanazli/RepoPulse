@@ -25,6 +25,7 @@ namespace RepoPulse
             // in the Microsoft.Extensions.Http package just for named/typed
             // clients from IHttpClientFactory.
             builder.Services.AddSingleton<AuthorizationSessionStore>();
+            builder.Services.AddSingleton<UserSessionStore>();
 
             builder.Services.AddSingleton<IRepoPulseAuthApiClient>(_ =>
                 new RepoPulseAuthApiClient(CreateAuthApiHttpClient()));
@@ -36,7 +37,11 @@ namespace RepoPulse
                 Timeout = TimeSpan.FromSeconds(15)
             }));
 
-            builder.Services.AddTransient<MainPage>();
+            builder.Services.AddTransient<AppShell>();
+            builder.Services.AddTransient<LoginPage>();
+            builder.Services.AddTransient<RepositoryListPage>();
+            builder.Services.AddTransient<RepositoryDetailPage>();
+            builder.Services.AddTransient<SettingsPage>();
 
             return builder.Build();
         }
