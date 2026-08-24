@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="RepoPulse.SettingsPage"
+             Title="Ayarlar">
+
+    <VerticalStackLayout
+        Padding="30,20"
+        Spacing="20">
+
+        <HorizontalStackLayout Spacing="12">
+            <Image
+                x:Name="GitHubAvatarImage"
+                HeightRequest="48"
+                WidthRequest="48"
+                Aspect="AspectFill"
+                SemanticProperties.Description="GitHub profil fotoğrafı" />
+            <Label
+                x:Name="GitHubLoginLabel"
+                VerticalOptions="Center"
+                SemanticProperties.HeadingLevel="Level1" />
+        </HorizontalStackLayout>
+
+        <Button
+            x:Name="SignOutButton"
+            Text="Çıkış yap"
+            Clicked="OnSignOutClicked"
+            SemanticProperties.Hint="Oturumu kapatır ve giriş ekranına döner"
+            HorizontalOptions="Fill" />
+
+    </VerticalStackLayout>
+
+</ContentPage>
