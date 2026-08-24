@@ -72,4 +72,25 @@ public class UserSessionStoreTests
         Assert.Equal("second-user", store.Current!.Login);
         Assert.Equal("second-token", store.Current.AccessToken);
     }
+
+    [Fact]
+    public void SignIn_WithoutAccessTokenExpiration_DefaultsToNull()
+    {
+        var store = new UserSessionStore();
+
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+
+        Assert.Null(store.Current!.AccessTokenExpiresAtUtc);
+    }
+
+    [Fact]
+    public void SignIn_WithAccessTokenExpiration_StoresIt()
+    {
+        var store = new UserSessionStore();
+        var expiresAt = DateTimeOffset.UtcNow.AddHours(1);
+
+        store.SignIn(new UserSession("access-token", null, "octocat", null, expiresAt));
+
+        Assert.Equal(expiresAt, store.Current!.AccessTokenExpiresAtUtc);
+    }
 }

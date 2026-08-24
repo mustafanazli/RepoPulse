@@ -7,18 +7,24 @@ namespace RepoPulse;
 // in and letting them sign out. No placeholder/not-yet-implemented options.
 public partial class SettingsPage : ContentPage
 {
+    private static readonly TimeSpan SignOutTimeout = TimeSpan.FromSeconds(10);
+
     private readonly UserSessionStore userSessionStore;
+    private readonly SessionPersistenceStore sessionPersistenceStore;
     private bool isSigningOut;
 
-    public SettingsPage(UserSessionStore userSessionStore)
+    public SettingsPage(UserSessionStore userSessionStore, SessionPersistenceStore sessionPersistenceStore)
     {
         InitializeComponent();
         this.userSessionStore = userSessionStore;
+        this.sessionPersistenceStore = sessionPersistenceStore;
     }
 
     protected override void OnAppearing()
     {
         base.OnAppearing();
+
+        SignOutStatusLabel.IsVisible = false;
 
         var session = userSessionStore.Current;
         GitHubLoginLabel.Text = session is not null ? $"@{session.Login}" : string.Empty;
@@ -39,22 +45,49 @@ public partial class SettingsPage : ContentPage
         isSigningOut = true;
         SignOutButton.IsEnabled = false;
 
-        userSessionStore.SignOut();
-
         try
         {
-            // Absolute route ("//") replaces the whole navigation stack —
-            // the back button/gesture can never return to a protected page
-            // after this.
-            await Shell.Current.GoToAsync($"//{AppRoutes.Login}");
+            using var cts = new CancellationTokenSource(SignOutTimeout);
+
+            // SessionPersistenceStore removes the persisted key and only
+            // then clears UserSessionStore — a false here means the
+            // persisted session may still be on disk, so the old session
+            // must not be allowed to look "gone"; stay put and let the
+            // user retry rather than navigating away.
+            var signedOut = await sessionPersistenceStore.SignOutAsync(cts.Token);
+            if (!signedOut)
+            {
+                SetStatus("Çıkış yapılamadı, lütfen tekrar deneyin.");
+                SignOutButton.IsEnabled = true;
+                return;
+            }
+
+            try
+            {
+                // Absolute route ("//") replaces the whole navigation
+                // stack — the back button/gesture can never return to a
+                // protected page after this.
+                await Shell.Current.GoToAsync($"//{AppRoutes.Login}");
+            }
+            catch (Exception)
+            {
+                SignOutButton.IsEnabled = true;
+            }
         }
         catch (Exception)
         {
+            SetStatus("Çıkış yapılamadı, lütfen tekrar deneyin.");
             SignOutButton.IsEnabled = true;
         }
         finally
         {
             isSigningOut = false;
         }
+    }
+
+    private void SetStatus(string statusText)
+    {
+        SignOutStatusLabel.Text = statusText;
+        SignOutStatusLabel.IsVisible = true;
     }
 }

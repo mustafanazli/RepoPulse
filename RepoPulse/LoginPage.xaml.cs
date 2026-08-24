@@ -6,10 +6,12 @@ namespace RepoPulse;
 
 // Owns the OAuth Authorization Code + PKCE flow (RP-002/003/005) and the
 // live-staging exchange (RP-006-era staging integration). On a successful
-// sign-in, populates UserSessionStore and replaces the ENTIRE navigation
-// stack with RepositoryListPage (absolute "//" route) — so the back
-// button/gesture can never return here to a still-pending or already-used
-// sign-in attempt. This page itself is never a protected route.
+// sign-in, persists the session via SessionPersistenceStore (RP-008 —
+// SecureStorage, populating UserSessionStore only once that succeeds) and
+// replaces the ENTIRE navigation stack with RepositoryListPage (absolute
+// "//" route) — so the back button/gesture can never return here to a
+// still-pending or already-used sign-in attempt. This page itself is never
+// a protected route.
 public partial class LoginPage : ContentPage
 {
     private static readonly TimeSpan SessionLifetime = TimeSpan.FromMinutes(5);
@@ -18,7 +20,7 @@ public partial class LoginPage : ContentPage
     private readonly IRepoPulseAuthApiClient authApiClient;
     private readonly IGitHubApiClient gitHubApiClient;
     private readonly AuthorizationSessionStore sessionStore;
-    private readonly UserSessionStore userSessionStore;
+    private readonly SessionPersistenceStore sessionPersistenceStore;
 
     private bool isSubscribedToOAuthCallbacks;
     private bool isSignInInProgress;
@@ -27,13 +29,13 @@ public partial class LoginPage : ContentPage
         IRepoPulseAuthApiClient authApiClient,
         IGitHubApiClient gitHubApiClient,
         AuthorizationSessionStore sessionStore,
-        UserSessionStore userSessionStore)
+        SessionPersistenceStore sessionPersistenceStore)
     {
         InitializeComponent();
         this.authApiClient = authApiClient;
         this.gitHubApiClient = gitHubApiClient;
         this.sessionStore = sessionStore;
-        this.userSessionStore = userSessionStore;
+        this.sessionPersistenceStore = sessionPersistenceStore;
     }
 
     protected override void OnAppearing()
@@ -160,7 +162,23 @@ public partial class LoginPage : ContentPage
             return;
         }
 
-        userSessionStore.SignIn(new UserSession(accessToken, refreshToken, userResult.User.Login, userResult.User.AvatarUrl));
+        var accessTokenExpiresAtUtc = exchangeResult.Success.ExpiresIn is { } expiresInSeconds
+            ? DateTimeOffset.UtcNow.AddSeconds(expiresInSeconds)
+            : (DateTimeOffset?)null;
+
+        var userSession = new UserSession(accessToken, refreshToken, userResult.User.Login, userResult.User.AvatarUrl, accessTokenExpiresAtUtc);
+
+        // A sign-in is not considered complete until the session is
+        // durably persisted — SessionPersistenceStore only populates the
+        // in-memory UserSessionStore once SecureStorage write succeeds.
+        var persisted = await sessionPersistenceStore.SignInAsync(userSession, cts.Token);
+        if (!persisted)
+        {
+            SetStatus("Oturum güvenli şekilde kaydedilemedi, lütfen tekrar deneyin.");
+            EndSignInAttempt();
+            return;
+        }
+
         EndSignInAttempt();
         await NavigateToRepositoryListAsync();
     }

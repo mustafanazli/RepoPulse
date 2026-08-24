@@ -16,11 +16,12 @@ public partial class AppShell : Shell
         InitializeComponent();
         this.userSessionStore = userSessionStore;
 
-        // Works around a MAUI Shell issue where two bare ShellContent
-        // siblings (no TabBar/FlyoutItem wrapper) can leave CurrentItem
-        // unset, which crashes the Android ShellItemRenderer with
-        // "Active Shell Item not set" on first launch.
-        CurrentItem = LoginContent;
+        // Works around a MAUI Shell issue where bare ShellContent siblings
+        // (no TabBar/FlyoutItem wrapper) can leave CurrentItem unset, which
+        // crashes the Android ShellItemRenderer with "Active Shell Item not
+        // set" on first launch. BootstrapPage (RP-008) reads the persisted
+        // session and routes to Login/RepositoryList itself.
+        CurrentItem = BootstrapContent;
 
         // RepositoryList and Login are declared as ShellContent in
         // AppShell.xaml (so they're reachable with an absolute "//" route

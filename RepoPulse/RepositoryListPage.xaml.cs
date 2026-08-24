@@ -8,23 +8,27 @@ namespace RepoPulse;
 // the access token from UserSessionStore (never from a route/query
 // parameter) and, on a successful lookup, offers navigation to
 // RepositoryDetailPage — passing only the already-fetched GitHubRepository
-// object, never the token, via Shell query parameters (RP-007).
+// object, never the token, via Shell query parameters (RP-007). A 401 from
+// GitHub (e.g. a restored-but-now-invalid RP-008 session) clears both the
+// persisted and in-memory session and returns to Login.
 public partial class RepositoryListPage : ContentPage
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
 
     private readonly IGitHubApiClient gitHubApiClient;
     private readonly UserSessionStore userSessionStore;
+    private readonly SessionPersistenceStore sessionPersistenceStore;
 
     private bool isRepositoryLookupInProgress;
     private bool isNavigatingToDetail;
     private GitHubRepository? lastFetchedRepository;
 
-    public RepositoryListPage(IGitHubApiClient gitHubApiClient, UserSessionStore userSessionStore)
+    public RepositoryListPage(IGitHubApiClient gitHubApiClient, UserSessionStore userSessionStore, SessionPersistenceStore sessionPersistenceStore)
     {
         InitializeComponent();
         this.gitHubApiClient = gitHubApiClient;
         this.userSessionStore = userSessionStore;
+        this.sessionPersistenceStore = sessionPersistenceStore;
     }
 
     protected override void OnAppearing()
@@ -74,11 +78,45 @@ public partial class RepositoryListPage : ContentPage
 
         if (!repositoryResult.IsSuccess || repositoryResult.Repository is null)
         {
+            if (repositoryResult.FailureKind == GitHubRepositoryFailureKind.Unauthorized)
+            {
+                // A previously-valid (possibly restored, RP-008) token was
+                // just rejected by GitHub itself — the session is no
+                // longer valid regardless of what SecureStorage still
+                // holds. Always route to Login here, even if clearing the
+                // persisted copy fails: keeping the user "signed in" to a
+                // token GitHub has already rejected is worse than a
+                // possible stale value left on disk (which the next
+                // restore attempt will simply try to clear again).
+                await HandleInvalidSessionAsync();
+                return;
+            }
+
             SetRepositoryError(DescribeRepositoryFailure(repositoryResult.FailureKind));
             return;
         }
 
         SetRepositoryResult(repositoryResult.Repository);
+    }
+
+    private async Task HandleInvalidSessionAsync()
+    {
+        try
+        {
+            using var cts = new CancellationTokenSource(RequestTimeout);
+            await sessionPersistenceStore.SignOutAsync(cts.Token);
+        }
+        catch (Exception)
+        {
+        }
+
+        try
+        {
+            await Shell.Current.GoToAsync($"//{AppRoutes.Login}");
+        }
+        catch (Exception)
+        {
+        }
     }
 
     private async void OnViewDetailClicked(object? sender, EventArgs e)
