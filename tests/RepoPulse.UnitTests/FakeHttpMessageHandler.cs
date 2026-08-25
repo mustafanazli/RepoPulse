@@ -10,6 +10,8 @@ internal sealed class FakeHttpMessageHandler : HttpMessageHandler
 
     public HttpRequestMessage? LastRequest { get; private set; }
     public string? LastRequestBody { get; private set; }
+    public List<HttpRequestMessage> Requests { get; } = new();
+    public int RequestCount => Requests.Count;
 
     public FakeHttpMessageHandler(Func<HttpRequestMessage, HttpResponseMessage> responder)
     {
@@ -19,6 +21,7 @@ internal sealed class FakeHttpMessageHandler : HttpMessageHandler
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
         LastRequest = request;
+        Requests.Add(request);
         LastRequestBody = request.Content is null ? null : await request.Content.ReadAsStringAsync(cancellationToken);
         return responder(request);
     }

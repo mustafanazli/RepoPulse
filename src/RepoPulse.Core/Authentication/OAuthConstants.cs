@@ -22,4 +22,11 @@ public static class OAuthConstants
     // RepoPulse.Core.Repositories.RepositoryIdentifierParser for the only
     // place user input is turned into these two path segments.
     public const string RepositoryEndpointBase = "https://api.github.com/repos";
+
+    // Authenticated user's repository list (RP-009). Host/path are also used
+    // as the trust anchor GitHubApiClient checks a paginated Link header's
+    // "next" URL against before ever following it.
+    public const string RepositoryListHost = "api.github.com";
+    public const string RepositoryListPath = "/user/repos";
+    public const string RepositoryListEndpoint = "https://" + RepositoryListHost + RepositoryListPath;
 }
