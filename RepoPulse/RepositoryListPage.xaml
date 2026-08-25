@@ -95,9 +95,29 @@
                     Color="{AppThemeBinding Light={StaticResource Gray200}, Dark={StaticResource Gray600}}" />
 
                 <Label
-                    Text="Repository Listesi"
+                    Text="Repository'lerim"
                     Style="{StaticResource SubHeadline}"
                     SemanticProperties.HeadingLevel="Level2" />
+
+                <SearchBar
+                    x:Name="RepositoryListSearchBar"
+                    Placeholder="Listemde ara"
+                    TextChanged="OnRepositoryListSearchTextChanged"
+                    SemanticProperties.Hint="Yüklenmiş repository listesinde ada veya açıklamaya göre arama yapın" />
+
+                <Picker
+                    x:Name="RepositorySortPicker"
+                    Title="Sırala"
+                    SelectedIndex="0"
+                    SelectedIndexChanged="OnRepositorySortOrderChanged"
+                    SemanticProperties.Hint="Repository listesinin sıralama biçimini seçin">
+                    <Picker.ItemsSource>
+                        <x:Array Type="{x:Type x:String}">
+                            <x:String>Son güncellenen</x:String>
+                            <x:String>Ada göre A-Z</x:String>
+                        </x:Array>
+                    </Picker.ItemsSource>
+                </Picker>
 
             </VerticalStackLayout>
         </CollectionView.Header>
@@ -114,6 +134,11 @@
                     IsVisible="False"
                     Text="Henüz görüntülenecek repository bulunamadı."
                     SemanticProperties.Description="Repository listesi boş" />
+                <Label
+                    x:Name="RepositoryListNoMatchesLabel"
+                    IsVisible="False"
+                    Text="Eşleşen repository bulunamadı."
+                    SemanticProperties.Description="Aramayla eşleşen repository bulunamadı" />
                 <Label
                     x:Name="RepositoryListErrorLabel"
                     IsVisible="False"

@@ -30,6 +30,17 @@ public partial class RepositoryListPage : ContentPage
     private bool isNavigatingToDetail;
     private GitHubRepository? lastFetchedRepository;
 
+    // RP-011: client-side-only search/sort state over whatever
+    // repositoryListController.State.Repositories currently holds. Kept as
+    // page-local fields (never on the controller/State) so RP-010's session-
+    // generation reload guard and error/offline handling stay entirely
+    // untouched; they survive navigating to RepositoryDetailPage and back
+    // because Shell keeps this page instance alive, and are re-applied to
+    // whatever list a later reload (e.g. a new session generation) produces.
+    private IReadOnlyList<GitHubRepository> latestRepositories = Array.Empty<GitHubRepository>();
+    private string repositoryListSearchText = string.Empty;
+    private RepositorySortOrder repositoryListSortOrder = RepositorySortOrder.UpdatedDescending;
+
     private CancellationTokenSource? repositoryListLoadCts;
     // Set right before this page itself cancels an in-flight list load
     // (OnDisappearing) — distinguishes "the page is navigating away" from a
@@ -114,14 +125,9 @@ public partial class RepositoryListPage : ContentPage
     private void RenderRepositoryListState()
     {
         var state = repositoryListController.State;
+        latestRepositories = state.Repositories;
 
-        RepositoryItems.Clear();
-        foreach (var repository in state.Repositories)
-        {
-            RepositoryItems.Add(RepositoryListItem.FromRepository(repository));
-        }
-
-        RepositoryListTruncatedBanner.IsVisible = state.IsTruncated && RepositoryItems.Count > 0;
+        RepositoryListTruncatedBanner.IsVisible = state.IsTruncated && state.Repositories.Count > 0;
 
         switch (state.Status)
         {
@@ -146,6 +152,102 @@ public partial class RepositoryListPage : ContentPage
                 SetRepositoryListError(DescribeRepositoryFailure(null));
                 break;
         }
+
+        ApplyRepositoryListProjection();
+    }
+
+    // RP-011: re-derives what the CollectionView actually shows from
+    // latestRepositories + the current search text/sort order — never
+    // touches repositoryListController or issues a network request. Called
+    // both after every controller-driven render (RenderRepositoryListState)
+    // and directly from the search/sort UI handlers below.
+    private void ApplyRepositoryListProjection()
+    {
+        var projected = RepositoryListProjection.Apply(latestRepositories, repositoryListSearchText, repositoryListSortOrder);
+
+        SyncRepositoryItems(projected);
+
+        // "No matches" only makes sense when the underlying list genuinely
+        // has repositories but the search text filtered all of them out —
+        // a truly empty account (RepositoryListStatus.Empty) keeps showing
+        // RepositoryListEmptyLabel instead, and error/loading states keep
+        // their own messaging untouched by this.
+        RepositoryListNoMatchesLabel.IsVisible =
+            repositoryListController.State.Status == RepositoryListStatus.Loaded && projected.Count == 0;
+    }
+
+    // RP-011: MAUI's Android CollectionView hosts CollectionView.Header (the
+    // section containing RepositoryListSearchBar itself) inside the same
+    // RecyclerView as the items. RepositoryItems.Clear() raises a Reset,
+    // which forces a full adapter invalidation — tearing down and rebuilding
+    // the header along with every row, which drops the SearchBar's IME focus
+    // mid-keystroke. Reconciling in place instead (Remove/Insert/Move/
+    // indexer-replace only, never Clear) keeps every change granular, so the
+    // header — and the user's typing — is never disturbed. FullName is a
+    // stable per-user-unique identity for a repository; replacing an
+    // already-correctly-positioned entry (rather than skipping it) also
+    // refreshes its display fields after a reload produced new data for the
+    // same FullName (RP-010 session-generation reload).
+    private void SyncRepositoryItems(IReadOnlyList<GitHubRepository> projected)
+    {
+        var desired = projected.Select(RepositoryListItem.FromRepository).ToList();
+
+        for (var i = RepositoryItems.Count - 1; i >= 0; i--)
+        {
+            if (!desired.Any(item => item.FullName == RepositoryItems[i].FullName))
+            {
+                RepositoryItems.RemoveAt(i);
+            }
+        }
+
+        for (var i = 0; i < desired.Count; i++)
+        {
+            var item = desired[i];
+            var currentIndex = IndexOfRepositoryItem(item.FullName);
+
+            if (currentIndex == -1)
+            {
+                RepositoryItems.Insert(i, item);
+            }
+            else if (currentIndex != i)
+            {
+                RepositoryItems.Move(currentIndex, i);
+                RepositoryItems[i] = item;
+            }
+            else
+            {
+                RepositoryItems[i] = item;
+            }
+        }
+    }
+
+    private int IndexOfRepositoryItem(string fullName)
+    {
+        for (var i = 0; i < RepositoryItems.Count; i++)
+        {
+            if (RepositoryItems[i].FullName == fullName)
+            {
+                return i;
+            }
+        }
+
+        return -1;
+    }
+
+    private void OnRepositoryListSearchTextChanged(object? sender, TextChangedEventArgs e)
+    {
+        repositoryListSearchText = e.NewTextValue ?? string.Empty;
+        ApplyRepositoryListProjection();
+    }
+
+    private void OnRepositorySortOrderChanged(object? sender, EventArgs e)
+    {
+        repositoryListSortOrder = RepositorySortPicker.SelectedIndex switch
+        {
+            1 => RepositorySortOrder.NameAscending,
+            _ => RepositorySortOrder.UpdatedDescending
+        };
+        ApplyRepositoryListProjection();
     }
 
     private async void OnRepositoryItemSelected(object? sender, SelectionChangedEventArgs e)
@@ -354,9 +456,11 @@ public partial class RepositoryListPage : ContentPage
     {
         RepositoryListTruncatedBanner.IsVisible = false;
         RepositoryListEmptyLabel.IsVisible = false;
+        RepositoryListNoMatchesLabel.IsVisible = false;
         RepositoryListErrorLabel.IsVisible = false;
         RepositoryListLoadingIndicator.IsVisible = true;
         RepositoryListLoadingIndicator.IsRunning = true;
+        SetRepositoryListControlsEnabled(false);
     }
 
     private void SetRepositoryListLoaded()
@@ -365,6 +469,7 @@ public partial class RepositoryListPage : ContentPage
         RepositoryListLoadingIndicator.IsVisible = false;
         RepositoryListEmptyLabel.IsVisible = false;
         RepositoryListErrorLabel.IsVisible = false;
+        SetRepositoryListControlsEnabled(true);
     }
 
     private void SetRepositoryListEmpty()
@@ -372,7 +477,9 @@ public partial class RepositoryListPage : ContentPage
         RepositoryListLoadingIndicator.IsRunning = false;
         RepositoryListLoadingIndicator.IsVisible = false;
         RepositoryListErrorLabel.IsVisible = false;
+        RepositoryListNoMatchesLabel.IsVisible = false;
         RepositoryListEmptyLabel.IsVisible = true;
+        SetRepositoryListControlsEnabled(true);
     }
 
     private void SetRepositoryListError(string message)
@@ -380,8 +487,20 @@ public partial class RepositoryListPage : ContentPage
         RepositoryListLoadingIndicator.IsRunning = false;
         RepositoryListLoadingIndicator.IsVisible = false;
         RepositoryListEmptyLabel.IsVisible = false;
+        RepositoryListNoMatchesLabel.IsVisible = false;
         RepositoryListErrorLabel.Text = message;
         RepositoryListErrorLabel.IsVisible = true;
         SemanticScreenReader.Announce(message);
+        SetRepositoryListControlsEnabled(true);
+    }
+
+    // RP-011: the search/sort controls operate purely in-memory, but
+    // disabling them while a load is in flight keeps their state legible —
+    // e.g. avoids a user typing into a search box whose underlying list is
+    // about to be replaced by RenderRepositoryListState.
+    private void SetRepositoryListControlsEnabled(bool enabled)
+    {
+        RepositoryListSearchBar.IsEnabled = enabled;
+        RepositorySortPicker.IsEnabled = enabled;
     }
 }
