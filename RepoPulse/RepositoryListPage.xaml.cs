@@ -164,8 +164,16 @@ public partial class RepositoryListPage : ContentPage
     private void ApplyRepositoryListProjection()
     {
         var projected = RepositoryListProjection.Apply(latestRepositories, repositoryListSearchText, repositoryListSortOrder);
+        var desired = projected.Select(RepositoryListItem.FromRepository).ToList();
 
-        SyncRepositoryItems(projected);
+        // RepositoryListItemSynchronizer (RepoPulse.Core, MAUI-independent
+        // and unit-tested) never Clear()s RepositoryItems — only Remove/
+        // Insert/Move/indexer-replace — and compares repository identity by
+        // FullName case-insensitively, so a casing-only change updates the
+        // existing row in place instead of removing+reinserting it or
+        // leaving a duplicate behind. See its own doc comment for why a
+        // Reset specifically must never happen here.
+        RepositoryListItemSynchronizer.Sync(RepositoryItems, desired);
 
         // "No matches" only makes sense when the underlying list genuinely
         // has repositories but the search text filtered all of them out —
@@ -174,64 +182,6 @@ public partial class RepositoryListPage : ContentPage
         // their own messaging untouched by this.
         RepositoryListNoMatchesLabel.IsVisible =
             repositoryListController.State.Status == RepositoryListStatus.Loaded && projected.Count == 0;
-    }
-
-    // RP-011: MAUI's Android CollectionView hosts CollectionView.Header (the
-    // section containing RepositoryListSearchBar itself) inside the same
-    // RecyclerView as the items. RepositoryItems.Clear() raises a Reset,
-    // which forces a full adapter invalidation — tearing down and rebuilding
-    // the header along with every row, which drops the SearchBar's IME focus
-    // mid-keystroke. Reconciling in place instead (Remove/Insert/Move/
-    // indexer-replace only, never Clear) keeps every change granular, so the
-    // header — and the user's typing — is never disturbed. FullName is a
-    // stable per-user-unique identity for a repository; replacing an
-    // already-correctly-positioned entry (rather than skipping it) also
-    // refreshes its display fields after a reload produced new data for the
-    // same FullName (RP-010 session-generation reload).
-    private void SyncRepositoryItems(IReadOnlyList<GitHubRepository> projected)
-    {
-        var desired = projected.Select(RepositoryListItem.FromRepository).ToList();
-
-        for (var i = RepositoryItems.Count - 1; i >= 0; i--)
-        {
-            if (!desired.Any(item => item.FullName == RepositoryItems[i].FullName))
-            {
-                RepositoryItems.RemoveAt(i);
-            }
-        }
-
-        for (var i = 0; i < desired.Count; i++)
-        {
-            var item = desired[i];
-            var currentIndex = IndexOfRepositoryItem(item.FullName);
-
-            if (currentIndex == -1)
-            {
-                RepositoryItems.Insert(i, item);
-            }
-            else if (currentIndex != i)
-            {
-                RepositoryItems.Move(currentIndex, i);
-                RepositoryItems[i] = item;
-            }
-            else
-            {
-                RepositoryItems[i] = item;
-            }
-        }
-    }
-
-    private int IndexOfRepositoryItem(string fullName)
-    {
-        for (var i = 0; i < RepositoryItems.Count; i++)
-        {
-            if (RepositoryItems[i].FullName == fullName)
-            {
-                return i;
-            }
-        }
-
-        return -1;
     }
 
     private void OnRepositoryListSearchTextChanged(object? sender, TextChangedEventArgs e)
