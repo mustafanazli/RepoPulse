@@ -1,16 +1,22 @@
+using System.Collections.ObjectModel;
 using RepoPulse.Core.Authentication;
 using RepoPulse.Core.Navigation;
 using RepoPulse.Core.Repositories;
 
 namespace RepoPulse;
 
-// RP-006's repository lookup, moved here from the removed MainPage. Reads
-// the access token from UserSessionStore (never from a route/query
-// parameter) and, on a successful lookup, offers navigation to
-// RepositoryDetailPage — passing only the already-fetched GitHubRepository
-// object, never the token, via Shell query parameters (RP-007). A 401 from
-// GitHub (e.g. a restored-but-now-invalid RP-008 session) clears both the
-// persisted and in-memory session and returns to Login.
+// RP-006's single repository lookup (now the page's "GitHub'da Repository
+// Aç" section) plus RP-010's real repository list, both reading the access
+// token from UserSessionStore (never from a route/query parameter). List
+// loading/error/empty/truncation state is owned by RepositoryListController
+// (RepoPulse.Core, MAUI-independent and unit-testable); this page only
+// drives it and renders RepositoryListState. Selecting either a list item or
+// the single search result offers navigation to RepositoryDetailPage —
+// passing only the already-fetched GitHubRepository object, never the
+// token, via Shell query parameters (RP-007). A 401 from GitHub (e.g. a
+// restored-but-now-invalid RP-008 session), from either the list load or the
+// single lookup, clears both the persisted and in-memory session and
+// returns to Login.
 public partial class RepositoryListPage : ContentPage
 {
     private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
@@ -18,10 +24,21 @@ public partial class RepositoryListPage : ContentPage
     private readonly IGitHubApiClient gitHubApiClient;
     private readonly UserSessionStore userSessionStore;
     private readonly SessionPersistenceStore sessionPersistenceStore;
+    private readonly RepositoryListController repositoryListController;
 
     private bool isRepositoryLookupInProgress;
     private bool isNavigatingToDetail;
     private GitHubRepository? lastFetchedRepository;
+
+    private CancellationTokenSource? repositoryListLoadCts;
+    // Set right before this page itself cancels an in-flight list load
+    // (OnDisappearing) — distinguishes "the page is navigating away" from a
+    // genuine request timeout, since both surface as the same
+    // OperationCanceledException. Only the former must never be shown to
+    // the user as an error.
+    private bool repositoryListLoadCancelledByNavigation;
+
+    public ObservableCollection<RepositoryListItem> RepositoryItems { get; } = new();
 
     public RepositoryListPage(IGitHubApiClient gitHubApiClient, UserSessionStore userSessionStore, SessionPersistenceStore sessionPersistenceStore)
     {
@@ -29,6 +46,9 @@ public partial class RepositoryListPage : ContentPage
         this.gitHubApiClient = gitHubApiClient;
         this.userSessionStore = userSessionStore;
         this.sessionPersistenceStore = sessionPersistenceStore;
+        repositoryListController = new RepositoryListController(gitHubApiClient);
+
+        RepositoryCollectionView.ItemsSource = RepositoryItems;
     }
 
     protected override void OnAppearing()
@@ -37,6 +57,111 @@ public partial class RepositoryListPage : ContentPage
         // A fresh arrival at the list (e.g. after signing back in) should
         // never show a stale result from a previous session.
         isNavigatingToDetail = false;
+
+        var accessToken = userSessionStore.Current?.AccessToken;
+        if (accessToken is not null && !repositoryListController.IsLoading && !repositoryListController.HasLoadedFor(accessToken))
+        {
+            _ = LoadRepositoryListAsync(accessToken);
+        }
+    }
+
+    protected override void OnDisappearing()
+    {
+        base.OnDisappearing();
+        // Never leaves an HTTP request running once the user has navigated
+        // away from this page (e.g. into RepositoryDetailPage).
+        repositoryListLoadCancelledByNavigation = true;
+        repositoryListLoadCts?.Cancel();
+    }
+
+    private async Task LoadRepositoryListAsync(string accessToken)
+    {
+        repositoryListLoadCancelledByNavigation = false;
+        SetRepositoryListLoading();
+
+        repositoryListLoadCts?.Dispose();
+        repositoryListLoadCts = new CancellationTokenSource(RequestTimeout);
+
+        try
+        {
+            await repositoryListController.LoadAsync(accessToken, repositoryListLoadCts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            if (repositoryListLoadCancelledByNavigation)
+            {
+                // The page is going away — never show cancellation as an
+                // error; OnAppearing will simply retry next time the list
+                // hasn't successfully loaded yet.
+                return;
+            }
+
+            // A genuine timeout, not a navigation-triggered cancellation —
+            // this is a real connectivity problem and must be reported.
+            SetRepositoryListError(DescribeRepositoryFailure(GitHubRepositoryFailureKind.NetworkError));
+            return;
+        }
+
+        RenderRepositoryListState();
+
+        if (repositoryListController.State.Status == RepositoryListStatus.Unauthorized)
+        {
+            await HandleInvalidSessionAsync();
+        }
+    }
+
+    private void RenderRepositoryListState()
+    {
+        var state = repositoryListController.State;
+
+        RepositoryItems.Clear();
+        foreach (var repository in state.Repositories)
+        {
+            RepositoryItems.Add(RepositoryListItem.FromRepository(repository));
+        }
+
+        RepositoryListTruncatedBanner.IsVisible = state.IsTruncated && RepositoryItems.Count > 0;
+
+        switch (state.Status)
+        {
+            case RepositoryListStatus.Loaded:
+                SetRepositoryListLoaded();
+                break;
+            case RepositoryListStatus.Empty:
+                SetRepositoryListEmpty();
+                break;
+            case RepositoryListStatus.Unauthorized:
+                // No error text needed here — HandleInvalidSessionAsync
+                // (called by the caller right after this) navigates to
+                // Login immediately.
+                break;
+            case RepositoryListStatus.RateLimited:
+                SetRepositoryListError(DescribeRepositoryFailure(GitHubRepositoryFailureKind.RateLimited));
+                break;
+            case RepositoryListStatus.NetworkError:
+                SetRepositoryListError(DescribeRepositoryFailure(GitHubRepositoryFailureKind.NetworkError));
+                break;
+            default:
+                SetRepositoryListError(DescribeRepositoryFailure(null));
+                break;
+        }
+    }
+
+    private async void OnRepositoryItemSelected(object? sender, SelectionChangedEventArgs e)
+    {
+        var selected = e.CurrentSelection.FirstOrDefault() as RepositoryListItem;
+
+        // Clear immediately so the same item can be selected again after
+        // returning from RepositoryDetailPage, and so a failed/cancelled
+        // navigation doesn't leave a stale visual selection behind.
+        RepositoryCollectionView.SelectedItem = null;
+
+        if (selected is null)
+        {
+            return;
+        }
+
+        await NavigateToDetailAsync(selected.Repository);
     }
 
     private async void OnLookupRepositoryClicked(object? sender, EventArgs e)
@@ -121,7 +246,20 @@ public partial class RepositoryListPage : ContentPage
 
     private async void OnViewDetailClicked(object? sender, EventArgs e)
     {
-        if (isNavigatingToDetail || lastFetchedRepository is null)
+        if (lastFetchedRepository is null)
+        {
+            return;
+        }
+
+        await NavigateToDetailAsync(lastFetchedRepository);
+    }
+
+    // Shared by both entry points (a tapped list item and the single-search
+    // "Detayları Gör" button) — one guard, so tapping both in quick
+    // succession still only ever navigates once.
+    private async Task NavigateToDetailAsync(GitHubRepository repository)
+    {
+        if (isNavigatingToDetail)
         {
             return;
         }
@@ -134,7 +272,7 @@ public partial class RepositoryListPage : ContentPage
             // Relative route: pushes onto the current stack, so the Shell
             // back button naturally returns here. Only the repository
             // object travels in the query — never the access token.
-            var query = RepositoryNavigationQueryBuilder.Build(lastFetchedRepository);
+            var query = RepositoryNavigationQueryBuilder.Build(repository);
             await Shell.Current.GoToAsync(AppRoutes.RepositoryDetail, new Dictionary<string, object>(query));
         }
         catch (Exception)
@@ -162,7 +300,9 @@ public partial class RepositoryListPage : ContentPage
     }
 
     // Maps the typed failure kind to a short, safe Turkish message — never a
-    // raw GitHub response body.
+    // raw GitHub response body. Shared by the single search AND the
+    // repository list, since both surface the same GitHubRepositoryFailureKind
+    // values (the list never produces NotFound).
     private static string DescribeRepositoryFailure(GitHubRepositoryFailureKind? kind) => kind switch
     {
         GitHubRepositoryFailureKind.NotFound => "Repository bulunamadı.",
@@ -207,5 +347,40 @@ public partial class RepositoryListPage : ContentPage
         RepositoryStatsLabel.Text = $"{repository.Stars} yıldız · {repository.Forks} fork · {repository.OpenIssuesAndPullRequests} açık issue + PR";
 
         RepositoryCard.IsVisible = true;
+    }
+
+    private void SetRepositoryListLoading()
+    {
+        RepositoryListTruncatedBanner.IsVisible = false;
+        RepositoryListEmptyLabel.IsVisible = false;
+        RepositoryListErrorLabel.IsVisible = false;
+        RepositoryListLoadingIndicator.IsVisible = true;
+        RepositoryListLoadingIndicator.IsRunning = true;
+    }
+
+    private void SetRepositoryListLoaded()
+    {
+        RepositoryListLoadingIndicator.IsRunning = false;
+        RepositoryListLoadingIndicator.IsVisible = false;
+        RepositoryListEmptyLabel.IsVisible = false;
+        RepositoryListErrorLabel.IsVisible = false;
+    }
+
+    private void SetRepositoryListEmpty()
+    {
+        RepositoryListLoadingIndicator.IsRunning = false;
+        RepositoryListLoadingIndicator.IsVisible = false;
+        RepositoryListErrorLabel.IsVisible = false;
+        RepositoryListEmptyLabel.IsVisible = true;
+    }
+
+    private void SetRepositoryListError(string message)
+    {
+        RepositoryListLoadingIndicator.IsRunning = false;
+        RepositoryListLoadingIndicator.IsVisible = false;
+        RepositoryListEmptyLabel.IsVisible = false;
+        RepositoryListErrorLabel.Text = message;
+        RepositoryListErrorLabel.IsVisible = true;
+        SemanticScreenReader.Announce(message);
     }
 }
