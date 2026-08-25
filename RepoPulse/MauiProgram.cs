@@ -28,6 +28,7 @@ namespace RepoPulse
             builder.Services.AddSingleton<AuthorizationSessionStore>();
             builder.Services.AddSingleton<UserSessionStore>();
             builder.Services.AddSingleton<ISecureSessionStorage, MauiSecureSessionStorage>();
+            builder.Services.AddSingleton<ISessionInvalidationMarker, MauiSessionInvalidationMarker>();
             builder.Services.AddSingleton<SessionPersistenceStore>();
 
             builder.Services.AddSingleton<IRepoPulseAuthApiClient>(_ =>

@@ -11,8 +11,9 @@ public class SessionPersistenceStoreTests
     public async Task SignInAsync_StorageSucceeds_PersistsAndPopulatesMemory()
     {
         var storage = new FakeSecureSessionStorage();
+        var marker = new FakeSessionInvalidationMarker();
         var userStore = new UserSessionStore();
-        var store = new SessionPersistenceStore(storage, userStore);
+        var store = new SessionPersistenceStore(storage, marker, userStore);
 
         var result = await store.SignInAsync(CreateSession(), CancellationToken.None);
 
@@ -29,8 +30,9 @@ public class SessionPersistenceStoreTests
         {
             SetException = new InvalidOperationException("MARKER-SENSITIVE-EXCEPTION-TEXT-9f3a")
         };
+        var marker = new FakeSessionInvalidationMarker();
         var userStore = new UserSessionStore();
-        var store = new SessionPersistenceStore(storage, userStore);
+        var store = new SessionPersistenceStore(storage, marker, userStore);
 
         var result = await store.SignInAsync(CreateSession(), CancellationToken.None);
 
@@ -43,8 +45,9 @@ public class SessionPersistenceStoreTests
     public async Task SignInAsync_InvalidSession_NeverAttemptsStorageWrite_MemoryCleared()
     {
         var storage = new FakeSecureSessionStorage();
+        var marker = new FakeSessionInvalidationMarker();
         var userStore = new UserSessionStore();
-        var store = new SessionPersistenceStore(storage, userStore);
+        var store = new SessionPersistenceStore(storage, marker, userStore);
 
         var result = await store.SignInAsync(CreateSession(accessToken: ""), CancellationToken.None);
 
@@ -54,15 +57,53 @@ public class SessionPersistenceStoreTests
     }
 
     [Fact]
+    public async Task SignInAsync_Success_ClearsAnyPriorInvalidationMarker()
+    {
+        var storage = new FakeSecureSessionStorage();
+        var marker = new FakeSessionInvalidationMarker { IsInvalidated = true };
+        var userStore = new UserSessionStore();
+        var store = new SessionPersistenceStore(storage, marker, userStore);
+
+        var result = await store.SignInAsync(CreateSession(), CancellationToken.None);
+
+        Assert.True(result);
+        Assert.False(marker.IsInvalidated);
+        Assert.Equal(1, marker.ClearCallCount);
+    }
+
+    [Fact]
+    public async Task SignInAsync_MarkerClearThrows_SignInStillSucceeds()
+    {
+        var storage = new FakeSecureSessionStorage();
+        var marker = new FakeSessionInvalidationMarker
+        {
+            IsInvalidated = true,
+            ClearException = new InvalidOperationException("MARKER-CLEAR-FAILURE")
+        };
+        var userStore = new UserSessionStore();
+        var store = new SessionPersistenceStore(storage, marker, userStore);
+
+        var result = await store.SignInAsync(CreateSession(), CancellationToken.None);
+
+        // The marker write failing doesn't crash or block sign-in this
+        // session — worst case, restore is unnecessarily rejected once
+        // more on a future cold start until a later sign-in's clear
+        // succeeds. Never a security regression, just an extra re-login.
+        Assert.True(result);
+        Assert.True(userStore.IsSignedIn);
+    }
+
+    [Fact]
     public async Task RestoreAsync_ValidStoredSession_PopulatesMemoryAndReturnsTrue()
     {
         var storage = new FakeSecureSessionStorage();
+        var marker = new FakeSessionInvalidationMarker();
         var userStore = new UserSessionStore();
-        var store = new SessionPersistenceStore(storage, userStore);
+        var store = new SessionPersistenceStore(storage, marker, userStore);
         await store.SignInAsync(CreateSession(), CancellationToken.None);
 
         var freshUserStore = new UserSessionStore();
-        var restoreStore = new SessionPersistenceStore(storage, freshUserStore);
+        var restoreStore = new SessionPersistenceStore(storage, marker, freshUserStore);
 
         var result = await restoreStore.RestoreAsync(DateTimeOffset.UtcNow, CancellationToken.None);
 
@@ -75,8 +116,9 @@ public class SessionPersistenceStoreTests
     public async Task RestoreAsync_NoStoredSession_ReturnsFalse_MemoryUntouched()
     {
         var storage = new FakeSecureSessionStorage { StoredValue = null };
+        var marker = new FakeSessionInvalidationMarker();
         var userStore = new UserSessionStore();
-        var store = new SessionPersistenceStore(storage, userStore);
+        var store = new SessionPersistenceStore(storage, marker, userStore);
 
         var result = await store.RestoreAsync(DateTimeOffset.UtcNow, CancellationToken.None);
 
@@ -88,8 +130,9 @@ public class SessionPersistenceStoreTests
     public async Task RestoreAsync_CorruptStoredPayload_RemovesKeyAndReturnsFalse()
     {
         var storage = new FakeSecureSessionStorage { StoredValue = "{ this is not valid json" };
+        var marker = new FakeSessionInvalidationMarker();
         var userStore = new UserSessionStore();
-        var store = new SessionPersistenceStore(storage, userStore);
+        var store = new SessionPersistenceStore(storage, marker, userStore);
 
         var result = await store.RestoreAsync(DateTimeOffset.UtcNow, CancellationToken.None);
 
@@ -103,12 +146,13 @@ public class SessionPersistenceStoreTests
     public async Task RestoreAsync_ExpiredStoredPayload_RemovesKeyAndReturnsFalse()
     {
         var storage = new FakeSecureSessionStorage();
-        var seedStore = new SessionPersistenceStore(storage, new UserSessionStore());
+        var marker = new FakeSessionInvalidationMarker();
+        var seedStore = new SessionPersistenceStore(storage, marker, new UserSessionStore());
         var expiredSession = new UserSession("token", null, "octocat", null, DateTimeOffset.UtcNow.AddMinutes(-30));
         await seedStore.SignInAsync(expiredSession, CancellationToken.None);
 
         var userStore = new UserSessionStore();
-        var restoreStore = new SessionPersistenceStore(storage, userStore);
+        var restoreStore = new SessionPersistenceStore(storage, marker, userStore);
 
         var result = await restoreStore.RestoreAsync(DateTimeOffset.UtcNow, CancellationToken.None);
 
@@ -124,8 +168,9 @@ public class SessionPersistenceStoreTests
         {
             GetException = new InvalidOperationException("MARKER-UNDECRYPTABLE-ANDROID-KEYSTORE-VALUE")
         };
+        var marker = new FakeSessionInvalidationMarker();
         var userStore = new UserSessionStore();
-        var store = new SessionPersistenceStore(storage, userStore);
+        var store = new SessionPersistenceStore(storage, marker, userStore);
 
         var result = await store.RestoreAsync(DateTimeOffset.UtcNow, CancellationToken.None);
 
@@ -138,8 +183,9 @@ public class SessionPersistenceStoreTests
     public async Task SignOutAsync_RemoveSucceeds_ClearsPersistedAndMemory_ReturnsTrue()
     {
         var storage = new FakeSecureSessionStorage();
+        var marker = new FakeSessionInvalidationMarker();
         var userStore = new UserSessionStore();
-        var store = new SessionPersistenceStore(storage, userStore);
+        var store = new SessionPersistenceStore(storage, marker, userStore);
         await store.SignInAsync(CreateSession(), CancellationToken.None);
 
         var result = await store.SignOutAsync(CancellationToken.None);
@@ -147,6 +193,8 @@ public class SessionPersistenceStoreTests
         Assert.True(result);
         Assert.False(userStore.IsSignedIn);
         Assert.Null(storage.StoredValue);
+        // A clean removal never needs the fallback marker.
+        Assert.False(marker.IsInvalidated);
     }
 
     [Fact]
@@ -156,8 +204,9 @@ public class SessionPersistenceStoreTests
         {
             RemoveException = new InvalidOperationException("MARKER-REMOVE-FAILURE")
         };
+        var marker = new FakeSessionInvalidationMarker();
         var userStore = new UserSessionStore();
-        var store = new SessionPersistenceStore(storage, userStore);
+        var store = new SessionPersistenceStore(storage, marker, userStore);
         userStore.SignIn(CreateSession());
 
         var result = await store.SignOutAsync(CancellationToken.None);
@@ -168,14 +217,19 @@ public class SessionPersistenceStoreTests
         // copy — which would silently restore the "signed out" user again
         // on next launch — might still be sitting on disk.
         Assert.True(userStore.IsSignedIn);
+        // The removal failure must set the fallback invalidation marker —
+        // this is what stops the still-present stale payload from being
+        // trusted by a later RestoreAsync.
+        Assert.True(marker.IsInvalidated);
     }
 
     [Fact]
     public async Task SignOutAsync_NoPersistedValueToRemove_StillSucceeds()
     {
         var storage = new FakeSecureSessionStorage { StoredValue = null };
+        var marker = new FakeSessionInvalidationMarker();
         var userStore = new UserSessionStore();
-        var store = new SessionPersistenceStore(storage, userStore);
+        var store = new SessionPersistenceStore(storage, marker, userStore);
         userStore.SignIn(CreateSession());
 
         var result = await store.SignOutAsync(CancellationToken.None);
@@ -185,11 +239,105 @@ public class SessionPersistenceStoreTests
     }
 
     [Fact]
+    public async Task SignOutAsync_RemoveThrows_MarkerSetAlsoThrows_DoesNotCrash_StillReturnsFalse()
+    {
+        var storage = new FakeSecureSessionStorage
+        {
+            RemoveException = new InvalidOperationException("MARKER-REMOVE-FAILURE")
+        };
+        var marker = new FakeSessionInvalidationMarker
+        {
+            SetException = new InvalidOperationException("MARKER-SET-FAILURE")
+        };
+        var userStore = new UserSessionStore();
+        var store = new SessionPersistenceStore(storage, marker, userStore);
+        userStore.SignIn(CreateSession());
+
+        var result = await store.SignOutAsync(CancellationToken.None);
+
+        Assert.False(result);
+        Assert.True(userStore.IsSignedIn);
+    }
+
+    // This is the regression test for the confirmed stale-session-restore
+    // bug: a 401 handler calls SignOutAsync, the persisted key's removal
+    // throws (so the stale, now-invalid-per-GitHub payload is still on
+    // disk), and the user is routed to Login regardless. Without the
+    // invalidation marker, a later RestoreAsync would happily parse and
+    // restore that exact stale payload again.
+    [Fact]
+    public async Task RestoreAsync_AfterFailedSignOutRemoval_NeverRestoresStaleSession()
+    {
+        var storage = new FakeSecureSessionStorage();
+        var marker = new FakeSessionInvalidationMarker();
+
+        var seedUserStore = new UserSessionStore();
+        var seedStore = new SessionPersistenceStore(storage, marker, seedUserStore);
+        await seedStore.SignInAsync(CreateSession(), CancellationToken.None);
+
+        // Now simulate the persisted key's removal failing (e.g. the 401
+        // handler's SignOutAsync call), leaving the stale, already-invalid
+        // payload physically present in storage.
+        storage.RemoveException = new InvalidOperationException("MARKER-REMOVE-FAILURE");
+        var signOutResult = await seedStore.SignOutAsync(CancellationToken.None);
+        Assert.False(signOutResult);
+        Assert.NotNull(storage.StoredValue);
+
+        var freshUserStore = new UserSessionStore();
+        var restoreStore = new SessionPersistenceStore(storage, marker, freshUserStore);
+
+        var restored = await restoreStore.RestoreAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+
+        Assert.False(restored);
+        Assert.False(freshUserStore.IsSignedIn);
+    }
+
+    [Fact]
+    public async Task RestoreAsync_MarkerSet_ReturnsFalse_EvenIfStoredPayloadIsOtherwiseValid()
+    {
+        var storage = new FakeSecureSessionStorage();
+        var seedMarker = new FakeSessionInvalidationMarker();
+        var seedStore = new SessionPersistenceStore(storage, seedMarker, new UserSessionStore());
+        await seedStore.SignInAsync(CreateSession(), CancellationToken.None);
+        Assert.NotNull(storage.StoredValue);
+
+        var invalidatedMarker = new FakeSessionInvalidationMarker { IsInvalidated = true };
+        var userStore = new UserSessionStore();
+        var restoreStore = new SessionPersistenceStore(storage, invalidatedMarker, userStore);
+
+        var result = await restoreStore.RestoreAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+
+        Assert.False(result);
+        Assert.False(userStore.IsSignedIn);
+    }
+
+    [Fact]
+    public async Task RestoreAsync_MarkerCheckThrows_FailsClosed_TreatsAsInvalidated()
+    {
+        var storage = new FakeSecureSessionStorage();
+        var seedStore = new SessionPersistenceStore(storage, new FakeSessionInvalidationMarker(), new UserSessionStore());
+        await seedStore.SignInAsync(CreateSession(), CancellationToken.None);
+
+        var marker = new FakeSessionInvalidationMarker
+        {
+            IsSetException = new InvalidOperationException("MARKER-READ-FAILURE")
+        };
+        var userStore = new UserSessionStore();
+        var restoreStore = new SessionPersistenceStore(storage, marker, userStore);
+
+        var result = await restoreStore.RestoreAsync(DateTimeOffset.UtcNow, CancellationToken.None);
+
+        Assert.False(result);
+        Assert.False(userStore.IsSignedIn);
+    }
+
+    [Fact]
     public async Task ConcurrentSignInRestoreSignOut_AreSerialized_NeverOverlap()
     {
         var storage = new FakeSecureSessionStorage { OperationDelay = TimeSpan.FromMilliseconds(30) };
+        var marker = new FakeSessionInvalidationMarker();
         var userStore = new UserSessionStore();
-        var store = new SessionPersistenceStore(storage, userStore);
+        var store = new SessionPersistenceStore(storage, marker, userStore);
 
         var tasks = new[]
         {
@@ -281,6 +429,51 @@ public class SessionPersistenceStoreTests
             {
                 activeCalls--;
             }
+        }
+    }
+
+    private sealed class FakeSessionInvalidationMarker : ISessionInvalidationMarker
+    {
+        public bool IsInvalidated { get; set; }
+        public Exception? IsSetException { get; set; }
+        public Exception? SetException { get; set; }
+        public Exception? ClearException { get; set; }
+
+        public int SetCallCount { get; private set; }
+        public int ClearCallCount { get; private set; }
+
+        public Task<bool> IsSetAsync()
+        {
+            if (IsSetException is not null)
+            {
+                throw IsSetException;
+            }
+
+            return Task.FromResult(IsInvalidated);
+        }
+
+        public Task SetAsync()
+        {
+            SetCallCount++;
+            if (SetException is not null)
+            {
+                throw SetException;
+            }
+
+            IsInvalidated = true;
+            return Task.CompletedTask;
+        }
+
+        public Task ClearAsync()
+        {
+            ClearCallCount++;
+            if (ClearException is not null)
+            {
+                throw ClearException;
+            }
+
+            IsInvalidated = false;
+            return Task.CompletedTask;
         }
     }
 }

@@ -14,12 +14,17 @@ namespace RepoPulse.Core.Authentication;
 public sealed class SessionPersistenceStore
 {
     private readonly ISecureSessionStorage secureStorage;
+    private readonly ISessionInvalidationMarker invalidationMarker;
     private readonly UserSessionStore userSessionStore;
     private readonly SemaphoreSlim gate = new(1, 1);
 
-    public SessionPersistenceStore(ISecureSessionStorage secureStorage, UserSessionStore userSessionStore)
+    public SessionPersistenceStore(
+        ISecureSessionStorage secureStorage,
+        ISessionInvalidationMarker invalidationMarker,
+        UserSessionStore userSessionStore)
     {
         this.secureStorage = secureStorage;
+        this.invalidationMarker = invalidationMarker;
         this.userSessionStore = userSessionStore;
     }
 
@@ -63,6 +68,13 @@ public sealed class SessionPersistenceStore
                 return false;
             }
 
+            // A freshly, successfully persisted session supersedes any
+            // earlier "removal could not be confirmed" marker from a prior
+            // logout/401 — otherwise this brand-new, valid session would
+            // itself be rejected by RestoreAsync on the very next cold
+            // start.
+            await TryClearInvalidationMarkerAsync();
+
             userSessionStore.SignIn(session);
             return true;
         }
@@ -81,6 +93,29 @@ public sealed class SessionPersistenceStore
         await gate.WaitAsync(cancellationToken);
         try
         {
+            // The marker exists specifically for the case where a prior
+            // logout/401 could not confirm the persisted session key was
+            // actually removed — if set, whatever is still on disk (if
+            // anything) must never be trusted again until a new sign-in
+            // clears it. A failure reading the marker itself is treated
+            // the same as "set" (fail closed) rather than silently trusting
+            // a session that may have just been invalidated.
+            bool invalidated;
+            try
+            {
+                invalidated = await invalidationMarker.IsSetAsync();
+            }
+            catch (Exception)
+            {
+                invalidated = true;
+            }
+
+            if (invalidated)
+            {
+                await TryRemovePersistedAsync();
+                return false;
+            }
+
             string? raw;
             try
             {
@@ -158,7 +193,35 @@ public sealed class SessionPersistenceStore
         }
         catch (Exception)
         {
+            // Could not confirm the persisted session was actually
+            // removed — set the non-sensitive invalidation marker so a
+            // later RestoreAsync refuses to trust it even if the bytes are
+            // still on disk. Best-effort: if even this write fails, there
+            // is nothing further this method can safely do locally.
+            await TrySetInvalidationMarkerAsync();
             return false;
+        }
+    }
+
+    private async Task TrySetInvalidationMarkerAsync()
+    {
+        try
+        {
+            await invalidationMarker.SetAsync();
+        }
+        catch (Exception)
+        {
+        }
+    }
+
+    private async Task TryClearInvalidationMarkerAsync()
+    {
+        try
+        {
+            await invalidationMarker.ClearAsync();
+        }
+        catch (Exception)
+        {
         }
     }
 }
