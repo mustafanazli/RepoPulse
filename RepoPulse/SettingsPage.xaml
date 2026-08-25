@@ -28,6 +28,12 @@
             SemanticProperties.Hint="Oturumu kapatır ve giriş ekranına döner"
             HorizontalOptions="Fill" />
 
+        <Label
+            x:Name="SignOutStatusLabel"
+            IsVisible="False"
+            HorizontalTextAlignment="Center"
+            SemanticProperties.Description="Çıkış durumu" />
+
     </VerticalStackLayout>
 
 </ContentPage>

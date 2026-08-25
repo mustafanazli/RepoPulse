@@ -44,4 +44,11 @@ public class NavigationGuardTests
     {
         Assert.True(NavigationGuard.IsNavigationAllowed("someUnrelatedRoute", isSignedIn: false));
     }
+
+    [Fact]
+    public void BootstrapRoute_IsAlwaysAllowed_RegardlessOfSignInState()
+    {
+        Assert.True(NavigationGuard.IsNavigationAllowed($"//{AppRoutes.Bootstrap}", isSignedIn: false));
+        Assert.True(NavigationGuard.IsNavigationAllowed($"//{AppRoutes.Bootstrap}", isSignedIn: true));
+    }
 }

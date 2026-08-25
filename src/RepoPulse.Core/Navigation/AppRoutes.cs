@@ -8,6 +8,11 @@ namespace RepoPulse.Core.Navigation;
 // these constants directly.
 public static class AppRoutes
 {
+    // Initial Shell CurrentItem (RP-008) — reads the persisted session (if
+    // any) before routing to Login or RepositoryList, so Login never
+    // flashes on a cold start that turns out to already be signed in.
+    // Never protected, never a redirect target, never revisited.
+    public const string Bootstrap = "bootstrap";
     public const string Login = "login";
     public const string RepositoryList = "repositories";
     public const string RepositoryDetail = "repositoryDetail";

@@ -9,6 +9,12 @@
     FlyoutBehavior="Disabled">
 
     <ShellContent
+        x:Name="BootstrapContent"
+        Title="Yükleniyor"
+        ContentTemplate="{DataTemplate local:BootstrapPage}"
+        Route="{x:Static nav:AppRoutes.Bootstrap}" />
+
+    <ShellContent
         x:Name="LoginContent"
         Title="Giriş"
         ContentTemplate="{DataTemplate local:LoginPage}"

@@ -1,4 +1,5 @@
 ﻿using Microsoft.Extensions.Logging;
+using RepoPulse.Authentication;
 using RepoPulse.Core.Authentication;
 
 namespace RepoPulse
@@ -26,6 +27,9 @@ namespace RepoPulse
             // clients from IHttpClientFactory.
             builder.Services.AddSingleton<AuthorizationSessionStore>();
             builder.Services.AddSingleton<UserSessionStore>();
+            builder.Services.AddSingleton<ISecureSessionStorage, MauiSecureSessionStorage>();
+            builder.Services.AddSingleton<ISessionInvalidationMarker, MauiSessionInvalidationMarker>();
+            builder.Services.AddSingleton<SessionPersistenceStore>();
 
             builder.Services.AddSingleton<IRepoPulseAuthApiClient>(_ =>
                 new RepoPulseAuthApiClient(CreateAuthApiHttpClient()));
@@ -38,6 +42,7 @@ namespace RepoPulse
             }));
 
             builder.Services.AddTransient<AppShell>();
+            builder.Services.AddTransient<BootstrapPage>();
             builder.Services.AddTransient<LoginPage>();
             builder.Services.AddTransient<RepositoryListPage>();
             builder.Services.AddTransient<RepositoryDetailPage>();
