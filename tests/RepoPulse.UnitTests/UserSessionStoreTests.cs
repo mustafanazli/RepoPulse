@@ -93,4 +93,40 @@ public class UserSessionStoreTests
 
         Assert.Equal(expiresAt, store.Current!.AccessTokenExpiresAtUtc);
     }
+
+    [Fact]
+    public void SignIn_IncrementsSessionGeneration()
+    {
+        var store = new UserSessionStore();
+        var beforeGeneration = store.SessionGeneration;
+
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+
+        Assert.NotEqual(beforeGeneration, store.SessionGeneration);
+    }
+
+    [Fact]
+    public void SignOut_IncrementsSessionGeneration()
+    {
+        var store = new UserSessionStore();
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+        var beforeGeneration = store.SessionGeneration;
+
+        store.SignOut();
+
+        Assert.NotEqual(beforeGeneration, store.SessionGeneration);
+    }
+
+    [Fact]
+    public void SignIn_AfterSignOut_ProducesDifferentGenerationEvenForSameLogin()
+    {
+        var store = new UserSessionStore();
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+        var firstGeneration = store.SessionGeneration;
+
+        store.SignOut();
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+
+        Assert.NotEqual(firstGeneration, store.SessionGeneration);
+    }
 }
