@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Http;
+using System.Reflection;
 using System.Text;
 using RepoPulse.Core.Authentication;
 using RepoPulse.Core.Repositories;
@@ -13,6 +14,7 @@ namespace RepoPulse.UnitTests;
 public class RepositoryListControllerTests
 {
     private const string Token = "test-access-token";
+    private const long Generation = 1;
 
     private static GitHubRepository MakeRepository(string fullName) =>
         new(
@@ -47,6 +49,25 @@ public class RepositoryListControllerTests
 
     private static string RepositoryArrayJson(params string[] items) => "[" + string.Join(",", items) + "]";
 
+    // Structural proof (used after success/failure/cancellation) that no raw
+    // access token can be retained anywhere on the controller instance: every
+    // private instance field must be non-string-typed. Combined with the
+    // per-scenario tests below, this satisfies "token not retained after
+    // success/failure/cancellation" without needing to reach into any
+    // specific field by name (which would need updating every time an
+    // unrelated field is added).
+    private static void AssertNoStringTypedFieldRetained(RepositoryListController controller)
+    {
+        var fields = typeof(RepositoryListController).GetFields(BindingFlags.NonPublic | BindingFlags.Instance);
+
+        foreach (var field in fields)
+        {
+            Assert.False(
+                field.FieldType == typeof(string),
+                $"Field '{field.Name}' is string-typed and could retain a raw access token.");
+        }
+    }
+
     [Fact]
     public async Task LoadAsync_SuccessfulList_SetsLoadedStateWithRepositories()
     {
@@ -56,7 +77,7 @@ public class RepositoryListControllerTests
         });
         var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
 
-        await controller.LoadAsync(Token, CancellationToken.None);
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
 
         Assert.Equal(RepositoryListStatus.Loaded, controller.State.Status);
         Assert.Equal(2, controller.State.Repositories.Count);
@@ -72,7 +93,7 @@ public class RepositoryListControllerTests
         });
         var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
 
-        await controller.LoadAsync(Token, CancellationToken.None);
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
 
         Assert.Equal(RepositoryListStatus.Empty, controller.State.Status);
         Assert.Empty(controller.State.Repositories);
@@ -91,7 +112,7 @@ public class RepositoryListControllerTests
         });
         var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
 
-        await controller.LoadAsync(Token, CancellationToken.None);
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
 
         Assert.Equal(RepositoryListStatus.Loaded, controller.State.Status);
         Assert.True(controller.State.IsTruncated);
@@ -106,7 +127,7 @@ public class RepositoryListControllerTests
         });
         var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
 
-        await controller.LoadAsync(Token, CancellationToken.None);
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
 
         Assert.Equal(RepositoryListStatus.Unauthorized, controller.State.Status);
     }
@@ -122,7 +143,7 @@ public class RepositoryListControllerTests
         });
         var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
 
-        await controller.LoadAsync(Token, CancellationToken.None);
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
 
         Assert.Equal(RepositoryListStatus.RateLimited, controller.State.Status);
     }
@@ -145,11 +166,11 @@ public class RepositoryListControllerTests
         });
         var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
 
-        await controller.LoadAsync(Token, CancellationToken.None);
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
         Assert.Equal(RepositoryListStatus.Loaded, controller.State.Status);
 
         succeed = false;
-        await controller.LoadAsync(Token, CancellationToken.None);
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
 
         Assert.Equal(RepositoryListStatus.NetworkError, controller.State.Status);
         // The previously loaded list must still be there — a transient
@@ -166,7 +187,7 @@ public class RepositoryListControllerTests
         });
         var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
 
-        await controller.LoadAsync(Token, CancellationToken.None);
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
 
         Assert.Equal(RepositoryListStatus.Unexpected, controller.State.Status);
     }
@@ -192,8 +213,8 @@ public class RepositoryListControllerTests
         var handler = new DelayedHttpMessageHandler();
         var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
 
-        var firstLoad = controller.LoadAsync(Token, CancellationToken.None);
-        var secondLoad = controller.LoadAsync(Token, CancellationToken.None);
+        var firstLoad = controller.LoadAsync(Token, Generation, CancellationToken.None);
+        var secondLoad = controller.LoadAsync(Token, Generation, CancellationToken.None);
 
         handler.Complete(new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -217,7 +238,7 @@ public class RepositoryListControllerTests
         cts.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => controller.LoadAsync(Token, cts.Token));
+            () => controller.LoadAsync(Token, Generation, cts.Token));
 
         // Cancellation must never be reported as a failed load — State
         // stays exactly as it was (Idle), not Unexpected/NetworkError/etc.
@@ -226,7 +247,7 @@ public class RepositoryListControllerTests
     }
 
     [Fact]
-    public async Task HasLoadedFor_TrueForSameTokenAfterSuccess_FalseForDifferentToken()
+    public async Task HasLoadedFor_TrueForSameGenerationAfterSuccess_FalseForDifferentGeneration()
     {
         var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
@@ -234,11 +255,79 @@ public class RepositoryListControllerTests
         });
         var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
 
-        Assert.False(controller.HasLoadedFor(Token));
+        Assert.False(controller.HasLoadedFor(Generation));
 
-        await controller.LoadAsync(Token, CancellationToken.None);
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
 
-        Assert.True(controller.HasLoadedFor(Token));
-        Assert.False(controller.HasLoadedFor("a-different-token"));
+        Assert.True(controller.HasLoadedFor(Generation));
+        Assert.False(controller.HasLoadedFor(Generation + 1));
+    }
+
+    [Fact]
+    public async Task HasLoadedFor_NewSessionGenerationEvenForSameLogin_TriggersReload()
+    {
+        // Simulates signing out and back in as the same GitHub login: the
+        // access token value could in principle be identical, but the
+        // session generation always changes — HasLoadedFor must key off the
+        // generation, never the token, so this must report "not loaded".
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(RepositoryArrayJson(RepositoryJson("owner/A")), Encoding.UTF8, "application/json")
+        });
+        var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
+
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
+        Assert.True(controller.HasLoadedFor(Generation));
+
+        var nextGeneration = Generation + 1;
+        Assert.False(controller.HasLoadedFor(nextGeneration));
+
+        await controller.LoadAsync(Token, nextGeneration, CancellationToken.None);
+        Assert.True(controller.HasLoadedFor(nextGeneration));
+        Assert.False(controller.HasLoadedFor(Generation));
+    }
+
+    [Fact]
+    public async Task LoadAsync_AfterSuccess_DoesNotRetainAccessTokenInAnyField()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(RepositoryArrayJson(RepositoryJson("owner/A")), Encoding.UTF8, "application/json")
+        });
+        var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
+
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
+
+        Assert.Equal(RepositoryListStatus.Loaded, controller.State.Status);
+        AssertNoStringTypedFieldRetained(controller);
+    }
+
+    [Fact]
+    public async Task LoadAsync_AfterFailure_DoesNotRetainAccessTokenInAnyField()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        });
+        var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
+
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
+
+        Assert.Equal(RepositoryListStatus.Unauthorized, controller.State.Status);
+        AssertNoStringTypedFieldRetained(controller);
+    }
+
+    [Fact]
+    public async Task LoadAsync_AfterCancellation_DoesNotRetainAccessTokenInAnyField()
+    {
+        var handler = new ThrowingHttpMessageHandler(new OperationCanceledException());
+        var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => controller.LoadAsync(Token, Generation, cts.Token));
+
+        AssertNoStringTypedFieldRetained(controller);
     }
 }

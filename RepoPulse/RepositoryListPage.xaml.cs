@@ -59,9 +59,10 @@ public partial class RepositoryListPage : ContentPage
         isNavigatingToDetail = false;
 
         var accessToken = userSessionStore.Current?.AccessToken;
-        if (accessToken is not null && !repositoryListController.IsLoading && !repositoryListController.HasLoadedFor(accessToken))
+        var sessionGeneration = userSessionStore.SessionGeneration;
+        if (accessToken is not null && !repositoryListController.IsLoading && !repositoryListController.HasLoadedFor(sessionGeneration))
         {
-            _ = LoadRepositoryListAsync(accessToken);
+            _ = LoadRepositoryListAsync(accessToken, sessionGeneration);
         }
     }
 
@@ -74,7 +75,7 @@ public partial class RepositoryListPage : ContentPage
         repositoryListLoadCts?.Cancel();
     }
 
-    private async Task LoadRepositoryListAsync(string accessToken)
+    private async Task LoadRepositoryListAsync(string accessToken, long sessionGeneration)
     {
         repositoryListLoadCancelledByNavigation = false;
         SetRepositoryListLoading();
@@ -84,7 +85,7 @@ public partial class RepositoryListPage : ContentPage
 
         try
         {
-            await repositoryListController.LoadAsync(accessToken, repositoryListLoadCts.Token);
+            await repositoryListController.LoadAsync(accessToken, sessionGeneration, repositoryListLoadCts.Token);
         }
         catch (OperationCanceledException)
         {

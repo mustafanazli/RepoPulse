@@ -16,6 +16,7 @@ public sealed class UserSessionStore
 {
     private readonly object gate = new();
     private UserSession? current;
+    private long sessionGeneration;
 
     public bool IsSignedIn
     {
@@ -27,22 +28,40 @@ public sealed class UserSessionStore
         get { lock (gate) { return current; } }
     }
 
+    // Non-sensitive, monotonically increasing counter — bumped on every
+    // SignIn (a fresh sign-in AND a cold-start SessionPersistenceStore
+    // restore both call SignIn) and every SignOut, so any two distinct
+    // sessions compare unequal, including signing out and back in as the
+    // very same GitHub login. Never derived from the token, never a hash of
+    // it — safe to hold, compare, or log freely. Callers (e.g.
+    // RepositoryListController, RP-010) use this instead of the raw access
+    // token as a cache/session identity, so a token is never retained
+    // outside UserSessionStore itself.
+    public long SessionGeneration
+    {
+        get { lock (gate) { return sessionGeneration; } }
+    }
+
     public void SignIn(UserSession session)
     {
         lock (gate)
         {
             current = session;
+            sessionGeneration++;
         }
     }
 
     // Clears every in-memory field of the session (access token, refresh
     // token, login, avatar) — nothing is left behind for a later page to
-    // accidentally read after sign-out.
+    // accidentally read after sign-out. Also invalidates SessionGeneration,
+    // so anything cached "for" the just-cleared session is recognized as
+    // stale even before a new sign-in happens.
     public void SignOut()
     {
         lock (gate)
         {
             current = null;
+            sessionGeneration++;
         }
     }
 }

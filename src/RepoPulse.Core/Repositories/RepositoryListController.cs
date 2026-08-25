@@ -11,7 +11,7 @@ namespace RepoPulse.Core.Repositories;
 public sealed class RepositoryListController
 {
     private readonly IGitHubApiClient gitHubApiClient;
-    private string? loadedForAccessToken;
+    private long? loadedForSessionGeneration;
 
     public RepositoryListController(IGitHubApiClient gitHubApiClient)
     {
@@ -23,12 +23,14 @@ public sealed class RepositoryListController
     public bool IsLoading { get; private set; }
 
     // True once a load has completed successfully (even to an empty list)
-    // for exactly this access token — RepositoryListPage's OnAppearing uses
-    // this to decide whether a reload is needed at all, so returning from
-    // RepositoryDetailPage (same token) never re-fetches, while a fresh
-    // sign-in (a new token) always does.
-    public bool HasLoadedFor(string accessToken) =>
-        State.Status is RepositoryListStatus.Loaded or RepositoryListStatus.Empty && loadedForAccessToken == accessToken;
+    // for exactly this session generation (UserSessionStore.SessionGeneration
+    // — a non-sensitive monotonic counter, never the access token itself) —
+    // RepositoryListPage's OnAppearing uses this to decide whether a reload
+    // is needed at all, so returning from RepositoryDetailPage (same
+    // generation) never re-fetches, while a fresh sign-in or sign-out/back-in
+    // (a new generation) always does.
+    public bool HasLoadedFor(long sessionGeneration) =>
+        State.Status is RepositoryListStatus.Loaded or RepositoryListStatus.Empty && loadedForSessionGeneration == sessionGeneration;
 
     // A second overlapping call while one is already in flight is a no-op —
     // the caller is expected to simply await the same in-flight result via
@@ -36,8 +38,9 @@ public sealed class RepositoryListController
     // request. A cancellation (the caller's token, e.g. the page navigating
     // away) propagates to the caller as-is and never touches State — only a
     // resolved GitHubRepositoryListResult ever changes it, so cancellation
-    // can never look like a failed load.
-    public async Task LoadAsync(string accessToken, CancellationToken cancellationToken)
+    // can never look like a failed load. accessToken is used only for this
+    // one call into gitHubApiClient — never retained on the controller.
+    public async Task LoadAsync(string accessToken, long sessionGeneration, CancellationToken cancellationToken)
     {
         if (IsLoading)
         {
@@ -48,7 +51,7 @@ public sealed class RepositoryListController
         try
         {
             var result = await gitHubApiClient.GetUserRepositoriesAsync(accessToken, cancellationToken);
-            State = MapResult(result, accessToken);
+            State = MapResult(result, sessionGeneration);
         }
         finally
         {
@@ -56,12 +59,12 @@ public sealed class RepositoryListController
         }
     }
 
-    private RepositoryListState MapResult(GitHubRepositoryListResult result, string accessToken)
+    private RepositoryListState MapResult(GitHubRepositoryListResult result, long sessionGeneration)
     {
         if (result.IsSuccess)
         {
             var repositories = result.Repositories ?? Array.Empty<GitHubRepository>();
-            loadedForAccessToken = accessToken;
+            loadedForSessionGeneration = sessionGeneration;
             var status = repositories.Count == 0 ? RepositoryListStatus.Empty : RepositoryListStatus.Loaded;
             return new RepositoryListState(status, repositories, result.IsTruncated);
         }
