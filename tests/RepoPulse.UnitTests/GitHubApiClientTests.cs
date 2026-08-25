@@ -873,9 +873,10 @@ public class GitHubApiClientTests
         Assert.Null(repository.PushedAt);
     }
 
-    // 17. A record missing a required field (full_name) is skipped, not fatal to the whole page.
+    // 17. A record missing a required field (full_name) is skipped, not fatal to the whole page —
+    // but the result must never claim to be complete when a record was dropped.
     [Fact]
-    public async Task GetUserRepositoriesAsync_RecordMissingRequiredField_IsSkippedButOthersReturned()
+    public async Task GetUserRepositoriesAsync_RecordMissingRequiredField_IsSkippedAndResultIsTruncated()
     {
         const string missingFullName = """
             {
@@ -898,6 +899,10 @@ public class GitHubApiClientTests
         Assert.True(result.IsSuccess);
         var repository = Assert.Single(result.Repositories!);
         Assert.Equal("owner/Good", repository.FullName);
+        // The dropped record must be signalled — a silent shrink with
+        // IsTruncated still false would let the caller believe the list is
+        // complete when it is not.
+        Assert.True(result.IsTruncated);
     }
 
     // 18. Cancellation propagates rather than being swallowed as a generic failure.
@@ -999,5 +1004,186 @@ public class GitHubApiClientTests
         Assert.Equal(
             "https://api.github.com/user/repos?sort=updated&direction=desc&per_page=100",
             handler.LastRequest!.RequestUri!.ToString());
+    }
+
+    // --- Pagination integrity hardening (targeted post-PR #11 audit) ---
+    // A next-link that is present but does not pass every one of these
+    // checks must never be followed, must never crash, and must always
+    // leave the result marked IsTruncated=true — the caller must never be
+    // told an incomplete list is complete.
+
+    [Fact]
+    public async Task GetUserRepositoriesAsync_NextLinkSkipsAPage_RejectedAndDoesNotFollow()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(RepositoryArrayJson(MinimalRepositoryJson("owner/A")), Encoding.UTF8, "application/json"),
+            // Current page is 1 — a valid next link would say page=2, not page=3.
+            Headers = { { "Link", NextLinkHeader(3) } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetUserRepositoriesAsync("test-access-token", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.IsTruncated);
+        Assert.Single(result.Repositories!);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("-1")]
+    public async Task GetUserRepositoriesAsync_NextLinkPageZeroOrNegative_RejectedAndTruncated(string pageValue)
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(RepositoryArrayJson(MinimalRepositoryJson("owner/A")), Encoding.UTF8, "application/json"),
+            Headers = { { "Link", $"<https://api.github.com/user/repos?page={pageValue}&per_page=100>; rel=\"next\"" } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetUserRepositoriesAsync("test-access-token", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.IsTruncated);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task GetUserRepositoriesAsync_NextLinkDuplicatePageKey_RejectedAndTruncated()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(RepositoryArrayJson(MinimalRepositoryJson("owner/A")), Encoding.UTF8, "application/json"),
+            Headers = { { "Link", "<https://api.github.com/user/repos?page=2&page=2&per_page=100>; rel=\"next\"" } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetUserRepositoriesAsync("test-access-token", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.IsTruncated);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task GetUserRepositoriesAsync_NextLinkDuplicateNonPageKey_RejectedAndTruncated()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(RepositoryArrayJson(MinimalRepositoryJson("owner/A")), Encoding.UTF8, "application/json"),
+            Headers = { { "Link", "<https://api.github.com/user/repos?page=2&per_page=100&per_page=100>; rel=\"next\"" } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetUserRepositoriesAsync("test-access-token", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.IsTruncated);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task GetUserRepositoriesAsync_NextLinkUnexpectedPerPageValue_RejectedAndTruncated()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(RepositoryArrayJson(MinimalRepositoryJson("owner/A")), Encoding.UTF8, "application/json"),
+            Headers = { { "Link", "<https://api.github.com/user/repos?page=2&per_page=99>; rel=\"next\"" } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetUserRepositoriesAsync("test-access-token", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.IsTruncated);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task GetUserRepositoriesAsync_NextLinkUnexpectedSortValue_RejectedAndTruncated()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(RepositoryArrayJson(MinimalRepositoryJson("owner/A")), Encoding.UTF8, "application/json"),
+            Headers = { { "Link", "<https://api.github.com/user/repos?page=2&per_page=100&sort=name>; rel=\"next\"" } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetUserRepositoriesAsync("test-access-token", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.IsTruncated);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task GetUserRepositoriesAsync_NextLinkUnexpectedDirectionValue_RejectedAndTruncated()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(RepositoryArrayJson(MinimalRepositoryJson("owner/A")), Encoding.UTF8, "application/json"),
+            Headers = { { "Link", "<https://api.github.com/user/repos?page=2&per_page=100&direction=asc>; rel=\"next\"" } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetUserRepositoriesAsync("test-access-token", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.IsTruncated);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Theory]
+    [InlineData("<https://api.github.com/user/repos?page=2&per_page=>; rel=\"next\"")] // empty value
+    [InlineData("<https://api.github.com/user/repos?page=2&=100>; rel=\"next\"")] // empty key
+    [InlineData("<https://api.github.com/user/repos?page=2&&per_page=100>; rel=\"next\"")] // stray "&&"
+    public async Task GetUserRepositoriesAsync_NextLinkEmptyKeyOrValue_RejectedAndTruncated(string linkHeaderValue)
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(RepositoryArrayJson(MinimalRepositoryJson("owner/A")), Encoding.UTF8, "application/json"),
+            Headers = { { "Link", linkHeaderValue } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetUserRepositoriesAsync("test-access-token", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.IsTruncated);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    // A clean, strictly-sequential two-page flow must still work after the
+    // stricter next-link validation above.
+    [Fact]
+    public async Task GetUserRepositoriesAsync_NormalTwoPageFlow_StillWorksAfterValidationHardening()
+    {
+        var handler = new FakeHttpMessageHandler(request =>
+        {
+            var page = GetRequestedPage(request);
+            return page switch
+            {
+                1 => new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(RepositoryArrayJson(MinimalRepositoryJson("owner/A")), Encoding.UTF8, "application/json"),
+                    Headers = { { "Link", NextLinkHeader(2) } }
+                },
+                2 => new HttpResponseMessage(HttpStatusCode.OK)
+                {
+                    Content = new StringContent(RepositoryArrayJson(MinimalRepositoryJson("owner/B")), Encoding.UTF8, "application/json")
+                },
+                _ => throw new InvalidOperationException("Unexpected page requested: " + page)
+            };
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetUserRepositoriesAsync("test-access-token", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.False(result.IsTruncated);
+        Assert.Equal(["owner/A", "owner/B"], result.Repositories!.Select(r => r.FullName));
+        Assert.Equal(2, handler.RequestCount);
     }
 }

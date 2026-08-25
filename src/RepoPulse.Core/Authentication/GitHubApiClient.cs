@@ -235,12 +235,19 @@ public sealed class GitHubApiClient : IGitHubApiClient
 
                 foreach (var element in document.RootElement.EnumerateArray())
                 {
-                    // A single malformed entry (missing owner/name/full_name)
-                    // is skipped rather than failing the whole page — one bad
-                    // record must not hide every other repository the
-                    // request otherwise successfully returned.
-                    if (TryParseRepositoryElement(element, out var repository) &&
-                        seenFullNames.Add(repository.FullName))
+                    if (!TryParseRepositoryElement(element, out var repository))
+                    {
+                        // A record missing a required field (owner/name/
+                        // full_name/html_url/default_branch) is skipped
+                        // rather than failing the whole page — but the
+                        // caller must never be told the list is complete
+                        // when it is not: dropping a record always marks
+                        // the result truncated.
+                        isTruncated = true;
+                        continue;
+                    }
+
+                    if (seenFullNames.Add(repository.FullName))
                     {
                         repositories.Add(repository);
                     }
@@ -260,7 +267,7 @@ public sealed class GitHubApiClient : IGitHubApiClient
                 break;
             }
 
-            var nextPageNumber = ValidateAndExtractPageNumber(nextUrl!);
+            var nextPageNumber = ValidateAndExtractPageNumber(nextUrl!, expectedPage: pageNumber + 1);
 
             if (nextPageNumber is null)
             {
@@ -337,7 +344,11 @@ public sealed class GitHubApiClient : IGitHubApiClient
         return (false, null);
     }
 
-    private static int? ValidateAndExtractPageNumber(string url)
+    // expectedPage is always the current page number + 1 — GitHub's own
+    // pages are consumed strictly in order, one at a time; a "next" link
+    // that names any other page (a skip, a repeat, or a jump backwards) is
+    // rejected exactly like a link that fails the host/path/scheme checks.
+    private static int? ValidateAndExtractPageNumber(string url, int expectedPage)
     {
         if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
         {
@@ -360,29 +371,59 @@ public sealed class GitHubApiClient : IGitHubApiClient
             return null;
         }
 
+        var seenKeys = new HashSet<string>(StringComparer.Ordinal);
         int? page = null;
-        foreach (var pair in queryString.Split('&', StringSplitOptions.RemoveEmptyEntries))
+
+        // Deliberately NOT StringSplitOptions.RemoveEmptyEntries — a stray
+        // "&&" or trailing "&" must be rejected, not silently ignored.
+        foreach (var pair in queryString.Split('&'))
         {
             var equalsIndex = pair.IndexOf('=');
-            var key = Uri.UnescapeDataString(equalsIndex >= 0 ? pair[..equalsIndex] : pair);
-            var value = Uri.UnescapeDataString(equalsIndex >= 0 ? pair[(equalsIndex + 1)..] : string.Empty);
+            if (equalsIndex < 0)
+            {
+                return null;
+            }
+
+            var key = Uri.UnescapeDataString(pair[..equalsIndex]);
+            var value = Uri.UnescapeDataString(pair[(equalsIndex + 1)..]);
+
+            if (key.Length == 0 || value.Length == 0)
+            {
+                return null;
+            }
+
+            if (!seenKeys.Add(key))
+            {
+                // The same query key must never appear twice.
+                return null;
+            }
 
             switch (key)
             {
                 case "page":
-                    if (!int.TryParse(value, out var parsedPage) || parsedPage < 1)
+                    if (!int.TryParse(value, out var parsedPage) || parsedPage != expectedPage)
                     {
                         return null;
                     }
                     page = parsedPage;
                     break;
                 case "per_page":
+                    if (value != "100")
+                    {
+                        return null;
+                    }
+                    break;
                 case "sort":
+                    if (value != "updated")
+                    {
+                        return null;
+                    }
+                    break;
                 case "direction":
-                    // Expected, GitHub-echoed parameters. Their values are not
-                    // otherwise validated — the actual next request is always
-                    // rebuilt from our own fixed base address, page size, and
-                    // this extracted page number, never from this URL.
+                    if (value != "desc")
+                    {
+                        return null;
+                    }
                     break;
                 default:
                     // Any parameter outside the expected set makes this
