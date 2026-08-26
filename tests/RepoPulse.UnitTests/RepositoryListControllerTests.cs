@@ -330,4 +330,65 @@ public class RepositoryListControllerTests
 
         AssertNoStringTypedFieldRetained(controller);
     }
+
+    // RP-011: RepositoryListProjection.Apply never takes an IGitHubApiClient
+    // or CancellationToken — it is structurally incapable of issuing a
+    // request. This test proves the point end-to-end: after one real load,
+    // repeatedly re-applying the projection with different search/sort
+    // combinations never changes the fake handler's request count.
+    [Fact]
+    public async Task ApplyingProjectionRepeatedly_AfterLoad_NeverIssuesAnotherRequest()
+    {
+        var requestCount = 0;
+        var handler = new FakeHttpMessageHandler(_ =>
+        {
+            requestCount++;
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(RepositoryArrayJson(RepositoryJson("owner/A"), RepositoryJson("owner/B")), Encoding.UTF8, "application/json")
+            };
+        });
+        var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
+
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
+        Assert.Equal(1, requestCount);
+
+        _ = RepositoryListProjection.Apply(controller.State.Repositories, "A", RepositorySortOrder.NameAscending);
+        _ = RepositoryListProjection.Apply(controller.State.Repositories, "", RepositorySortOrder.UpdatedDescending);
+        _ = RepositoryListProjection.Apply(controller.State.Repositories, "nonexistent", RepositorySortOrder.NameAscending);
+
+        Assert.Equal(1, requestCount);
+    }
+
+    // RP-011: when a new session generation triggers a real reload (RP-010
+    // behavior, unchanged), the exact same search text/sort order combination
+    // must apply to the freshly loaded list, not to whatever the previous
+    // generation returned.
+    [Fact]
+    public async Task NewSessionGenerationReload_ExistingProjectionAppliesToNewRepositoryList()
+    {
+        var page = 1;
+        var handler = new FakeHttpMessageHandler(_ =>
+        {
+            var body = page == 1
+                ? RepositoryArrayJson(RepositoryJson("owner/Alpha"), RepositoryJson("owner/Beta"))
+                : RepositoryArrayJson(RepositoryJson("owner/Gamma"), RepositoryJson("owner/Delta"));
+            return new HttpResponseMessage(HttpStatusCode.OK)
+            {
+                Content = new StringContent(body, Encoding.UTF8, "application/json")
+            };
+        });
+        var controller = new RepositoryListController(new GitHubApiClient(new HttpClient(handler)));
+
+        await controller.LoadAsync(Token, Generation, CancellationToken.None);
+        var firstProjection = RepositoryListProjection.Apply(controller.State.Repositories, null, RepositorySortOrder.NameAscending);
+        Assert.Equal(new[] { "owner/Alpha", "owner/Beta" }, firstProjection.Select(r => r.FullName));
+
+        page = 2;
+        var nextGeneration = Generation + 1;
+        await controller.LoadAsync(Token, nextGeneration, CancellationToken.None);
+        var secondProjection = RepositoryListProjection.Apply(controller.State.Repositories, null, RepositorySortOrder.NameAscending);
+
+        Assert.Equal(new[] { "owner/Delta", "owner/Gamma" }, secondProjection.Select(r => r.FullName));
+    }
 }
