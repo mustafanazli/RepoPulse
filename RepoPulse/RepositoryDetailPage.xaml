@@ -42,6 +42,19 @@
                 x:Name="RepositoryUrlLabel"
                 SemanticProperties.Hint="Repository'nin GitHub adresi" />
 
+            <Button
+                x:Name="FavoriteToggleButton"
+                Text="Favorilere ekle"
+                Clicked="OnFavoriteToggleClicked"
+                HorizontalOptions="Fill"
+                SemanticProperties.Hint="Bu repository'yi favorilere ekler veya favorilerden çıkarır" />
+
+            <Label
+                x:Name="FavoriteErrorLabel"
+                IsVisible="False"
+                TextColor="{AppThemeBinding Light=Crimson, Dark=OrangeRed}"
+                SemanticProperties.Description="Favori işlemi hatası" />
+
         </VerticalStackLayout>
     </ScrollView>
 

@@ -20,6 +20,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\RepoPulse.Core\RepoPulse.Core.csproj" />
+    <ProjectReference Include="..\..\src\RepoPulse.Infrastructure\RepoPulse.Infrastructure.csproj" />
   </ItemGroup>
 
 </Project>

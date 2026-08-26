@@ -2,6 +2,7 @@
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
              xmlns:repo="clr-namespace:RepoPulse.Core.Repositories;assembly=RepoPulse.Core"
+             xmlns:local="clr-namespace:RepoPulse"
              x:Class="RepoPulse.RepositoryListPage"
              Title="Repositories">
 
@@ -119,6 +120,38 @@
                     </Picker.ItemsSource>
                 </Picker>
 
+                <!-- RP-012: "Tümü" shows the live GitHub list exactly as
+                     RP-011 left it; "Favoriler" shows the SQLite-backed
+                     favorite set (full card when the repo is also present
+                     live, an identity-only row otherwise). A deliberate
+                     ItemsSource swap on the single CollectionView below —
+                     not a second CollectionView — so virtualization is
+                     never doubled up. -->
+                <Picker
+                    x:Name="RepositoryViewFilterPicker"
+                    Title="Görünüm"
+                    SelectedIndex="0"
+                    SelectedIndexChanged="OnRepositoryViewFilterChanged"
+                    SemanticProperties.Hint="Tüm repository'ler veya yalnızca favoriler arasında seçim yapın">
+                    <Picker.ItemsSource>
+                        <x:Array Type="{x:Type x:String}">
+                            <x:String>Tümü</x:String>
+                            <x:String>Favoriler</x:String>
+                        </x:Array>
+                    </Picker.ItemsSource>
+                </Picker>
+
+                <!-- Non-blocking: a failed favorite toggle or a failed
+                     on-demand fetch from an offline favorite row shows a
+                     short safe message here without touching the list's own
+                     loading/empty/error labels below, so the list itself
+                     keeps working regardless. -->
+                <Label
+                    x:Name="FavoriteToggleErrorLabel"
+                    IsVisible="False"
+                    TextColor="{AppThemeBinding Light=Crimson, Dark=OrangeRed}"
+                    SemanticProperties.Description="Favori işlemi hatası" />
+
             </VerticalStackLayout>
         </CollectionView.Header>
 
@@ -148,35 +181,70 @@
         </CollectionView.EmptyView>
 
         <CollectionView.ItemTemplate>
-            <DataTemplate x:DataType="repo:RepositoryListItem">
-                <Border Margin="30,0,30,12" Padding="16" StrokeShape="RoundRectangle 12">
-                    <VerticalStackLayout Spacing="4">
-                        <Label
-                            Text="{Binding FullName}"
-                            FontAttributes="Bold"
-                            FontSize="16"
-                            LineBreakMode="TailTruncation"
-                            SemanticProperties.HeadingLevel="Level2" />
-                        <Label
-                            Text="{Binding Description}"
-                            IsVisible="{Binding HasDescription}"
-                            LineBreakMode="TailTruncation"
-                            MaxLines="2"
-                            TextColor="{AppThemeBinding Light={StaticResource Gray500}, Dark={StaticResource Gray300}}" />
-                        <Label Text="{Binding StatsText}" />
-                        <Label
-                            Text="{Binding LanguageText}"
-                            TextColor="{AppThemeBinding Light={StaticResource Gray500}, Dark={StaticResource Gray300}}" />
-                        <Label
-                            Text="{Binding UpdatedText}"
-                            TextColor="{AppThemeBinding Light={StaticResource Gray500}, Dark={StaticResource Gray300}}" />
-                        <Label
-                            Text="{Binding BadgeText}"
-                            IsVisible="{Binding HasBadge}"
-                            FontAttributes="Italic" />
-                    </VerticalStackLayout>
-                </Border>
-            </DataTemplate>
+            <local:RepositoryListRowTemplateSelector>
+                <local:RepositoryListRowTemplateSelector.RepositoryTemplate>
+                    <DataTemplate x:DataType="repo:RepositoryListItem">
+                        <Border Margin="30,0,30,12" Padding="16" StrokeShape="RoundRectangle 12">
+                            <VerticalStackLayout Spacing="4">
+                                <Label
+                                    Text="{Binding FullName}"
+                                    FontAttributes="Bold"
+                                    FontSize="16"
+                                    LineBreakMode="TailTruncation"
+                                    SemanticProperties.HeadingLevel="Level2" />
+                                <Label
+                                    Text="{Binding Description}"
+                                    IsVisible="{Binding HasDescription}"
+                                    LineBreakMode="TailTruncation"
+                                    MaxLines="2"
+                                    TextColor="{AppThemeBinding Light={StaticResource Gray500}, Dark={StaticResource Gray300}}" />
+                                <Label Text="{Binding StatsText}" />
+                                <Label
+                                    Text="{Binding LanguageText}"
+                                    TextColor="{AppThemeBinding Light={StaticResource Gray500}, Dark={StaticResource Gray300}}" />
+                                <Label
+                                    Text="{Binding UpdatedText}"
+                                    TextColor="{AppThemeBinding Light={StaticResource Gray500}, Dark={StaticResource Gray300}}" />
+                                <Label
+                                    Text="{Binding BadgeText}"
+                                    IsVisible="{Binding HasBadge}"
+                                    FontAttributes="Italic" />
+                                <Button
+                                    Text="{Binding FavoriteToggleLabel}"
+                                    Clicked="OnFavoriteToggleClicked"
+                                    HorizontalOptions="Start"
+                                    SemanticProperties.Hint="Bu repository'yi favorilere ekler veya favorilerden çıkarır" />
+                            </VerticalStackLayout>
+                        </Border>
+                    </DataTemplate>
+                </local:RepositoryListRowTemplateSelector.RepositoryTemplate>
+                <local:RepositoryListRowTemplateSelector.FavoriteIdentityTemplate>
+                    <DataTemplate x:DataType="repo:FavoriteIdentityRow">
+                        <Border Margin="30,0,30,12" Padding="16" StrokeShape="RoundRectangle 12">
+                            <VerticalStackLayout Spacing="4">
+                                <Label
+                                    Text="{Binding FullName}"
+                                    FontAttributes="Bold"
+                                    FontSize="16"
+                                    LineBreakMode="TailTruncation"
+                                    SemanticProperties.HeadingLevel="Level2" />
+                                <Label
+                                    Text="{Binding AddedAtText}"
+                                    TextColor="{AppThemeBinding Light={StaticResource Gray500}, Dark={StaticResource Gray300}}" />
+                                <Label
+                                    Text="Ayrıntılar için bağlantı gerekli."
+                                    FontAttributes="Italic"
+                                    SemanticProperties.Description="Bu favori şu anda yalnızca kimlik bilgisiyle gösteriliyor" />
+                                <Button
+                                    Text="Favorilerden çıkar"
+                                    Clicked="OnFavoriteToggleClicked"
+                                    HorizontalOptions="Start"
+                                    SemanticProperties.Hint="Bu repository'yi favorilerden çıkarır" />
+                            </VerticalStackLayout>
+                        </Border>
+                    </DataTemplate>
+                </local:RepositoryListRowTemplateSelector.FavoriteIdentityTemplate>
+            </local:RepositoryListRowTemplateSelector>
         </CollectionView.ItemTemplate>
 
     </CollectionView>

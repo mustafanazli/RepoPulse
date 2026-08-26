@@ -21,11 +21,24 @@ namespace RepoPulse.Core.Repositories;
 // a duplicate behind.
 public static class RepositoryListItemSynchronizer
 {
-    public static void Sync(ObservableCollection<RepositoryListItem> current, IReadOnlyList<RepositoryListItem> desired)
+    public static void Sync(ObservableCollection<RepositoryListItem> current, IReadOnlyList<RepositoryListItem> desired) =>
+        Sync(current, desired, item => item.FullName);
+
+    // RP-012: generalized so the exact same never-Clear()s, identity-aware
+    // minimal-diff algorithm can also drive RepositoryListPage's "Favoriler"
+    // row collection (a mix of RepositoryListItem and FavoriteIdentityRow),
+    // without touching the RepositoryListItem-specific overload above or its
+    // existing behavior/tests at all. identityKeySelector lets each caller
+    // supply its own already-normalized (case-insensitive-safe) key.
+    public static void Sync<TItem>(
+        ObservableCollection<TItem> current,
+        IReadOnlyList<TItem> desired,
+        Func<TItem, string> identityKeySelector)
     {
         for (var i = current.Count - 1; i >= 0; i--)
         {
-            if (!desired.Any(item => AreSameIdentity(item.FullName, current[i].FullName)))
+            var currentKey = identityKeySelector(current[i]);
+            if (!desired.Any(item => AreSameIdentity(identityKeySelector(item), currentKey)))
             {
                 current.RemoveAt(i);
             }
@@ -34,7 +47,8 @@ public static class RepositoryListItemSynchronizer
         for (var i = 0; i < desired.Count; i++)
         {
             var item = desired[i];
-            var currentIndex = IndexOf(current, item.FullName);
+            var itemKey = identityKeySelector(item);
+            var currentIndex = IndexOf(current, itemKey, identityKeySelector);
 
             if (currentIndex == -1)
             {
@@ -52,11 +66,11 @@ public static class RepositoryListItemSynchronizer
         }
     }
 
-    private static int IndexOf(ObservableCollection<RepositoryListItem> current, string fullName)
+    private static int IndexOf<TItem>(ObservableCollection<TItem> current, string key, Func<TItem, string> identityKeySelector)
     {
         for (var i = 0; i < current.Count; i++)
         {
-            if (AreSameIdentity(current[i].FullName, fullName))
+            if (AreSameIdentity(identityKeySelector(current[i]), key))
             {
                 return i;
             }

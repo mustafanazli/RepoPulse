@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/RepoPulse.AuthApi/RepoPulse.AuthApi.csproj" />
     <Project Path="src/RepoPulse.Core/RepoPulse.Core.csproj" />
+    <Project Path="src/RepoPulse.Infrastructure/RepoPulse.Infrastructure.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/RepoPulse.AuthApi.Tests/RepoPulse.AuthApi.Tests.csproj" />
