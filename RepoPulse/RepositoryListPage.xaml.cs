@@ -37,7 +37,6 @@ public partial class RepositoryListPage : ContentPage
     // Page-local, ephemeral UI state — same reasoning as the RP-011 fields
     // below it.
     private bool repositoryViewIsFavoritesOnly;
-    private bool hasLoadedFavoritesOnce;
 
     // RP-011: client-side-only search/sort state over whatever
     // repositoryListController.State.Repositories currently holds. Kept as
@@ -90,16 +89,13 @@ public partial class RepositoryListPage : ContentPage
         // never show a stale result from a previous session.
         isNavigatingToDetail = false;
 
-        // RP-012: favorites are loaded exactly once per page lifetime (this
-        // page instance survives for the app's lifetime, same as the
-        // comment on latestRepositories below) — never tied to the GitHub
-        // session/generation, since favorites are intentionally not scoped
-        // per account (multi-account favorites is out of RP-012's scope).
-        if (!hasLoadedFavoritesOnce)
-        {
-            hasLoadedFavoritesOnce = true;
-            _ = LoadFavoritesAsync();
-        }
+        // RP-012 (fixed): favorites are scoped to the signed-in GitHub
+        // account (UserSessionStore.SessionGeneration) — this reloads them
+        // whenever that generation has changed since the last successful
+        // load (first appearance, sign-out, switching accounts, or signing
+        // back into the same account) and is a cheap no-op otherwise, so
+        // calling it on every OnAppearing is correct and inexpensive.
+        _ = EnsureFavoritesLoadedAsync();
 
         var accessToken = userSessionStore.Current?.AccessToken;
         var sessionGeneration = userSessionStore.SessionGeneration;
@@ -119,12 +115,12 @@ public partial class RepositoryListPage : ContentPage
         }
     }
 
-    private async Task LoadFavoritesAsync()
+    private async Task EnsureFavoritesLoadedAsync()
     {
         try
         {
             using var cts = new CancellationTokenSource(RequestTimeout);
-            await favoriteToggleController.LoadAsync(cts.Token);
+            await favoriteToggleController.EnsureLoadedForCurrentSessionAsync(cts.Token);
         }
         catch (OperationCanceledException)
         {

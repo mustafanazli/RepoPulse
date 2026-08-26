@@ -16,24 +16,38 @@ namespace RepoPulse.Infrastructure.Favorites;
 // No raw SQLite exception, message, or file path ever leaves this type —
 // every failure is translated to a FavoriteStoreFailureKind before it
 // crosses the IFavoriteRepositoryStore boundary.
+//
+// Every row is scoped by (AccountLoginNormalized, NormalizedFullName) — the
+// composite identity that fixes the original version's cross-account
+// favorite leak (a single global table shared by every GitHub account that
+// ever signed in on the device). This PR has not merged yet, so schema
+// version stays 1 (directly account-scoped) rather than adding a v1→v2
+// migration for data that was never released; a stale pre-fix dev database
+// is cleared by hand (uninstall/reinstall, or `pm clear`), never by
+// destructive code in this store.
 public sealed class SqliteFavoriteRepositoryStore : IFavoriteRepositoryStore, IAsyncDisposable
 {
     internal const string TableName = "FavoriteRepositories";
     private const int CurrentSchemaVersion = 1;
 
-    // NormalizedFullName is the primary key; NOT NULL is enforced on Owner/
-    // Name; AddedAtUtc is a NOT NULL Unix-seconds integer, never a
-    // locale-formatted string. Table/column names here are fixed constants,
+    // Composite PRIMARY KEY (AccountLoginNormalized, NormalizedFullName) —
+    // the same repository favorited by two different accounts is two
+    // independent rows; the same account favoriting it twice (including a
+    // casing-only repeat) is the same row. NOT NULL enforced on every
+    // identity/data column. Table/column names here are fixed constants,
     // never interpolated from a variable — the only interpolation in this
     // file is CurrentSchemaVersion (an internal int constant, not data) into
     // the PRAGMA user_version statement, which SQLite does not support bound
     // parameters for.
     private const string CreateTableSql = $"""
         CREATE TABLE IF NOT EXISTS {TableName} (
-            NormalizedFullName TEXT NOT NULL PRIMARY KEY,
+            AccountLoginNormalized TEXT NOT NULL,
+            NormalizedFullName TEXT NOT NULL,
+            AccountLogin TEXT NOT NULL,
             Owner TEXT NOT NULL,
             Name TEXT NOT NULL,
-            AddedAtUtc INTEGER NOT NULL
+            AddedAtUtc INTEGER NOT NULL,
+            PRIMARY KEY (AccountLoginNormalized, NormalizedFullName)
         )
         """;
 
@@ -64,8 +78,13 @@ public sealed class SqliteFavoriteRepositoryStore : IFavoriteRepositoryStore, IA
         }
     }
 
-    public async Task<FavoriteListResult> GetAllAsync(CancellationToken cancellationToken)
+    public async Task<FavoriteListResult> GetAllAsync(string accountLogin, CancellationToken cancellationToken)
     {
+        if (!FavoriteRepositoryIdentifier.TryNormalizeAccountLogin(accountLogin, out var normalizedAccountLogin))
+        {
+            return FavoriteListResult.Failure(FavoriteStoreFailureKind.Unexpected);
+        }
+
         await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -75,7 +94,9 @@ public sealed class SqliteFavoriteRepositoryStore : IFavoriteRepositoryStore, IA
                 return FavoriteListResult.Failure(init.FailureKind!.Value);
             }
 
-            var rows = await connection!.Table<FavoriteRepositoryRow>().ToListAsync().ConfigureAwait(false);
+            var rows = await connection!.Table<FavoriteRepositoryRow>()
+                .Where(row => row.AccountLoginNormalized == normalizedAccountLogin)
+                .ToListAsync().ConfigureAwait(false);
             var favorites = rows
                 .Select(row => new FavoriteRepository(row.Owner, row.Name, row.NormalizedFullName, DateTimeOffset.FromUnixTimeSeconds(row.AddedAtUtc)))
                 .ToList();
@@ -95,9 +116,10 @@ public sealed class SqliteFavoriteRepositoryStore : IFavoriteRepositoryStore, IA
         }
     }
 
-    public async Task<FavoriteStoreResult> AddAsync(string owner, string name, DateTimeOffset addedAtUtc, CancellationToken cancellationToken)
+    public async Task<FavoriteStoreResult> AddAsync(string accountLogin, string owner, string name, DateTimeOffset addedAtUtc, CancellationToken cancellationToken)
     {
-        if (!FavoriteRepositoryIdentifier.TryNormalize(owner, name, out var identity))
+        if (!FavoriteRepositoryIdentifier.TryNormalizeAccountLogin(accountLogin, out var normalizedAccountLogin) ||
+            !FavoriteRepositoryIdentifier.TryNormalize(owner, name, out var identity))
         {
             return FavoriteStoreResult.Failure(FavoriteStoreFailureKind.Unexpected);
         }
@@ -114,10 +136,12 @@ public sealed class SqliteFavoriteRepositoryStore : IFavoriteRepositoryStore, IA
             // Idempotent by construction: every Add/Remove/GetAll call for
             // this database file is serialized through `gate`, so this
             // check-then-insert can never race with another write to the
-            // same file — a repeated Add for an already-favorited identity
-            // always finds the existing row and leaves its AddedAtUtc alone.
+            // same file — a repeated Add for an already-favorited (account,
+            // repository) pair always finds the existing row and leaves its
+            // AddedAtUtc alone. A different account favoriting the exact
+            // same repository is a separate row (separate composite key).
             var existing = await connection!.Table<FavoriteRepositoryRow>()
-                .Where(row => row.NormalizedFullName == identity.NormalizedFullName)
+                .Where(row => row.AccountLoginNormalized == normalizedAccountLogin && row.NormalizedFullName == identity.NormalizedFullName)
                 .FirstOrDefaultAsync().ConfigureAwait(false);
 
             if (existing is not null)
@@ -127,7 +151,9 @@ public sealed class SqliteFavoriteRepositoryStore : IFavoriteRepositoryStore, IA
 
             var row = new FavoriteRepositoryRow
             {
+                AccountLoginNormalized = normalizedAccountLogin,
                 NormalizedFullName = identity.NormalizedFullName,
+                AccountLogin = accountLogin.Trim(),
                 Owner = identity.Owner,
                 Name = identity.Name,
                 AddedAtUtc = addedAtUtc.ToUnixTimeSeconds()
@@ -141,9 +167,10 @@ public sealed class SqliteFavoriteRepositoryStore : IFavoriteRepositoryStore, IA
             {
                 // Defensive-only: the `gate` above already makes this
                 // unreachable in practice, but a PRIMARY KEY conflict here
-                // still means "already a favorite" rather than a real
-                // failure, so it is treated the same as the existing-row
-                // case above instead of surfacing as Unexpected.
+                // still means "already a favorite for this account" rather
+                // than a real failure, so it is treated the same as the
+                // existing-row case above instead of surfacing as
+                // Unexpected.
             }
 
             return FavoriteStoreResult.Success();
@@ -162,9 +189,10 @@ public sealed class SqliteFavoriteRepositoryStore : IFavoriteRepositoryStore, IA
         }
     }
 
-    public async Task<FavoriteStoreResult> RemoveAsync(string owner, string name, CancellationToken cancellationToken)
+    public async Task<FavoriteStoreResult> RemoveAsync(string accountLogin, string owner, string name, CancellationToken cancellationToken)
     {
-        if (!FavoriteRepositoryIdentifier.TryNormalize(owner, name, out var identity))
+        if (!FavoriteRepositoryIdentifier.TryNormalizeAccountLogin(accountLogin, out var normalizedAccountLogin) ||
+            !FavoriteRepositoryIdentifier.TryNormalize(owner, name, out var identity))
         {
             return FavoriteStoreResult.Failure(FavoriteStoreFailureKind.Unexpected);
         }
@@ -180,8 +208,10 @@ public sealed class SqliteFavoriteRepositoryStore : IFavoriteRepositoryStore, IA
 
             // Parameterized via the typed query API — never string
             // interpolation/concatenation of the identity into raw SQL.
+            // Scoped to this account only, so removing a favorite can never
+            // touch another account's row for the same repository.
             await connection!.Table<FavoriteRepositoryRow>()
-                .Where(row => row.NormalizedFullName == identity.NormalizedFullName)
+                .Where(row => row.AccountLoginNormalized == normalizedAccountLogin && row.NormalizedFullName == identity.NormalizedFullName)
                 .DeleteAsync().ConfigureAwait(false);
 
             return FavoriteStoreResult.Success();
@@ -200,9 +230,10 @@ public sealed class SqliteFavoriteRepositoryStore : IFavoriteRepositoryStore, IA
         }
     }
 
-    public async Task<FavoriteStatusResult> IsFavoriteAsync(string owner, string name, CancellationToken cancellationToken)
+    public async Task<FavoriteStatusResult> IsFavoriteAsync(string accountLogin, string owner, string name, CancellationToken cancellationToken)
     {
-        if (!FavoriteRepositoryIdentifier.TryNormalize(owner, name, out var identity))
+        if (!FavoriteRepositoryIdentifier.TryNormalizeAccountLogin(accountLogin, out var normalizedAccountLogin) ||
+            !FavoriteRepositoryIdentifier.TryNormalize(owner, name, out var identity))
         {
             return FavoriteStatusResult.Failure(FavoriteStoreFailureKind.Unexpected);
         }
@@ -217,7 +248,7 @@ public sealed class SqliteFavoriteRepositoryStore : IFavoriteRepositoryStore, IA
             }
 
             var existing = await connection!.Table<FavoriteRepositoryRow>()
-                .Where(row => row.NormalizedFullName == identity.NormalizedFullName)
+                .Where(row => row.AccountLoginNormalized == normalizedAccountLogin && row.NormalizedFullName == identity.NormalizedFullName)
                 .FirstOrDefaultAsync().ConfigureAwait(false);
 
             return FavoriteStatusResult.Success(existing is not null);

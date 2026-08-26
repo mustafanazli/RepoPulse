@@ -69,4 +69,68 @@ public class FavoriteRepositoryIdentifierTests
 
         Assert.Equal("owner/name", identity.NormalizedFullName);
     }
+
+    // ---- Account login normalization (cross-account isolation fix) ----
+
+    [Fact]
+    public void TryNormalizeAccountLogin_TrimsWhitespaceAndLowercases()
+    {
+        var succeeded = FavoriteRepositoryIdentifier.TryNormalizeAccountLogin("  MustafaNazli  ", out var normalized);
+
+        Assert.True(succeeded);
+        Assert.Equal("mustafanazli", normalized);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("   ")]
+    public void TryNormalizeAccountLogin_EmptyOrWhitespace_Fails(string? accountLogin)
+    {
+        var succeeded = FavoriteRepositoryIdentifier.TryNormalizeAccountLogin(accountLogin, out _);
+
+        Assert.False(succeeded);
+    }
+
+    [Fact]
+    public void TryNormalizeAccountLogin_DifferentCasingOfSameLogin_ProducesIdenticalResult()
+    {
+        FavoriteRepositoryIdentifier.TryNormalizeAccountLogin("mustafanazli", out var first);
+        FavoriteRepositoryIdentifier.TryNormalizeAccountLogin("MustafaNazli", out var second);
+
+        Assert.Equal(first, second);
+    }
+
+    // Same Turkish-culture pitfall as NormalizeFullName above, now for
+    // account logins.
+    [Fact]
+    public void TryNormalizeAccountLogin_IsUnaffectedByCurrentCulture()
+    {
+        var originalCulture = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("tr-TR");
+
+            FavoriteRepositoryIdentifier.TryNormalizeAccountLogin("MustafaNazli", out var normalized);
+
+            Assert.Equal("mustafanazli", normalized);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+        }
+    }
+
+    [Fact]
+    public void TryNormalizeAccountLogin_TreatsInputAsOpaqueText_NoSpecialCasingBeyondTrimAndLowercase()
+    {
+        // Not a security check per se — just documents that this function
+        // has exactly one job (trim + lowercase) and never inspects/derives
+        // meaning from its input; any opaque string normalizes the same
+        // mechanical way, regardless of shape.
+        var succeeded = FavoriteRepositoryIdentifier.TryNormalizeAccountLogin("Some-OPAQUE.Value123", out var normalized);
+
+        Assert.True(succeeded);
+        Assert.Equal("some-opaque.value123", normalized);
+    }
 }

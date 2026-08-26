@@ -32,4 +32,24 @@ public static class FavoriteRepositoryIdentifier
     // (e.g. GitHubRepository.FullName / RepositoryListItem.FullName) so both
     // paths produce byte-identical keys for the same repository.
     public static string NormalizeFullName(string fullName) => fullName.ToLowerInvariant();
+
+    // Account-isolation identity (fix for the cross-account favorite leak):
+    // every favorite row is scoped to the GitHub login that added it, using
+    // the exact same Trim + ToLowerInvariant technique as repository
+    // identity above — never a token or a hash of one. GitHub logins are
+    // ASCII-only, so this is culture-independent for the same reason
+    // NormalizeFullName is.
+    public static bool TryNormalizeAccountLogin(string? accountLogin, out string normalizedAccountLogin)
+    {
+        var trimmed = accountLogin?.Trim();
+
+        if (string.IsNullOrEmpty(trimmed))
+        {
+            normalizedAccountLogin = string.Empty;
+            return false;
+        }
+
+        normalizedAccountLogin = trimmed.ToLowerInvariant();
+        return true;
+    }
 }
