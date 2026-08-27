@@ -70,13 +70,13 @@ public sealed class FavoriteToggleController
         favoritesByKey.Clear();
         LastLoadFailure = null;
 
-        if (snapshot.Session is null)
+        if (snapshot.Login is null)
         {
             loadedForSessionGeneration = snapshot.Generation;
             return;
         }
 
-        var result = await store.GetAllAsync(snapshot.Session.Login, cancellationToken).ConfigureAwait(false);
+        var result = await store.GetAllAsync(snapshot.Login, cancellationToken).ConfigureAwait(false);
 
         // The session may have changed (sign-out, switch to another account,
         // or even a fresh sign-in as the same account) while the await above
@@ -85,7 +85,7 @@ public sealed class FavoriteToggleController
         // discard it instead; the session that is now current already
         // cleared this same state above (on its own call) or will on its
         // next EnsureLoadedForCurrentSessionAsync call.
-        if (userSessionStore.SessionGeneration != snapshot.Generation)
+        if (!userSessionStore.IsCurrent(snapshot))
         {
             return;
         }
@@ -122,7 +122,7 @@ public sealed class FavoriteToggleController
         // active when this call started, never a login read moments later
         // from a different lock acquisition.
         var snapshot = userSessionStore.CaptureSnapshot();
-        if (snapshot.Session is null)
+        if (snapshot.Login is null)
         {
             return FavoriteToggleResult.Failure(FavoriteStoreFailureKind.Unexpected);
         }
@@ -143,8 +143,8 @@ public sealed class FavoriteToggleController
             var addedAtUtc = timeProvider.GetUtcNow();
 
             var result = wasFavorite
-                ? await store.RemoveAsync(snapshot.Session.Login, identity.Owner, identity.Name, cancellationToken).ConfigureAwait(false)
-                : await store.AddAsync(snapshot.Session.Login, identity.Owner, identity.Name, addedAtUtc, cancellationToken).ConfigureAwait(false);
+                ? await store.RemoveAsync(snapshot.Login, identity.Owner, identity.Name, cancellationToken).ConfigureAwait(false)
+                : await store.AddAsync(snapshot.Login, identity.Owner, identity.Name, addedAtUtc, cancellationToken).ConfigureAwait(false);
 
             // The session may have changed while the store call above was in
             // flight. The write itself already landed correctly scoped to
@@ -153,7 +153,7 @@ public sealed class FavoriteToggleController
             // account's change into whichever session is active today, so it
             // is discarded here instead of ever reaching Favorites/IsFavorite
             // or a caller's UI re-render.
-            if (userSessionStore.SessionGeneration != snapshot.Generation)
+            if (!userSessionStore.IsCurrent(snapshot))
             {
                 return FavoriteToggleResult.Ignored();
             }
