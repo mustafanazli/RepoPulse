@@ -13,6 +13,8 @@ public interface IGitHubApiClient
     Task<GitHubRepositoryResult> GetRepositoryAsync(string accessToken, string owner, string name, CancellationToken cancellationToken);
 
     Task<GitHubRepositoryListResult> GetUserRepositoriesAsync(string accessToken, CancellationToken cancellationToken);
+
+    Task<GitHubLatestCommitResult> GetLatestRepositoryCommitAsync(string accessToken, string owner, string repository, CancellationToken cancellationToken);
 }
 
 // Single responsibility: GET /user. Does not know about OAuth, PKCE, or the
@@ -153,6 +155,71 @@ public sealed class GitHubApiClient : IGitHubApiClient
                 return GitHubRepositoryResult.Failure(GitHubRepositoryFailureKind.RateLimited);
             default:
                 return GitHubRepositoryResult.Failure(GitHubRepositoryFailureKind.Unexpected);
+        }
+    }
+
+    // RP-013: GET /repos/{owner}/{repository}/commits?per_page=1 — a single
+    // record is always sufficient (GitHub returns commits newest-first by
+    // default), so no pagination/Link-header handling exists here, unlike
+    // GetUserRepositoriesAsync. Owner and repository are always the two
+    // fields of an already-fetched GitHubRepository — never raw user input —
+    // and are still percent-encoded here as defense in depth, exactly like
+    // GetRepositoryAsync.
+    public async Task<GitHubLatestCommitResult> GetLatestRepositoryCommitAsync(string accessToken, string owner, string repository, CancellationToken cancellationToken)
+    {
+        var requestUri = $"{OAuthConstants.RepositoryEndpointBase}/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}/commits?per_page=1";
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+        ApplyStandardHeaders(request, accessToken);
+
+        string body;
+        HttpStatusCode statusCode;
+        try
+        {
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            statusCode = response.StatusCode;
+            body = await response.Content.ReadAsStringAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.NetworkError);
+        }
+        catch (HttpRequestException)
+        {
+            return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.NetworkError);
+        }
+        // See the matching comment in RepoPulseAuthApiClient.ExchangeAsync —
+        // Xamarin.Android's HTTP handler can surface a raw socket failure as
+        // System.Net.WebException instead of HttpRequestException.
+        catch (WebException)
+        {
+            return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.NetworkError);
+        }
+
+        // Status code alone decides the outcome — GitHub's own response body
+        // (which may carry an error message) is never surfaced to the
+        // caller/UI/logs for any non-success status. GitHub returns 409 for
+        // a genuinely empty repository's commits endpoint — treated as a
+        // real success (zero commits), not a failure.
+        switch (statusCode)
+        {
+            case HttpStatusCode.OK:
+                return ParseLatestCommit(body);
+            case (HttpStatusCode)409:
+                return GitHubLatestCommitResult.NoCommits();
+            case HttpStatusCode.NotFound:
+                return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.NotFound);
+            case HttpStatusCode.Unauthorized:
+                return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.Unauthorized);
+            case HttpStatusCode.Forbidden:
+            case (HttpStatusCode)429:
+                return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.RateLimited);
+            default:
+                return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.Unexpected);
         }
     }
 
@@ -433,6 +500,92 @@ public sealed class GitHubApiClient : IGitHubApiClient
         }
 
         return page;
+    }
+
+    // The endpoint always returns a JSON array (newest commit first); this
+    // reads only element [0] and never tracks pagination — a single record
+    // is the entire contract. committer.date is tried first (when a commit
+    // is authored on one machine and committed/pushed from another, or
+    // rebased, committer.date reflects when it actually entered the
+    // repository's history — the more accurate "last activity" signal);
+    // author.date is a fallback only when committer.date is missing or
+    // unparsable. If neither date is present, this is malformed data, not a
+    // repository with a valid but unknown commit time — Unexpected, never a
+    // fabricated/guessed date, and never pushed_at/updated_at as a
+    // substitute (a repo can be pushed to, e.g. a tag, without a new
+    // commit).
+    private static GitHubLatestCommitResult ParseLatestCommit(string body)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            var root = document.RootElement;
+
+            if (root.ValueKind != JsonValueKind.Array)
+            {
+                return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.Unexpected);
+            }
+
+            if (root.GetArrayLength() == 0)
+            {
+                return GitHubLatestCommitResult.NoCommits();
+            }
+
+            var first = root[0];
+            if (first.ValueKind != JsonValueKind.Object ||
+                !first.TryGetProperty("commit", out var commitElement) ||
+                commitElement.ValueKind != JsonValueKind.Object)
+            {
+                return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.Unexpected);
+            }
+
+            var committedAt = TryGetPersonDate(commitElement, "committer") ?? TryGetPersonDate(commitElement, "author");
+            if (committedAt is null)
+            {
+                return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.Unexpected);
+            }
+
+            string? shortSha = first.TryGetProperty("sha", out var shaElement) && shaElement.ValueKind == JsonValueKind.String
+                ? TruncateSha(shaElement.GetString())
+                : null;
+
+            string? messageSummary = commitElement.TryGetProperty("message", out var messageElement) && messageElement.ValueKind == JsonValueKind.String
+                ? FirstLine(messageElement.GetString())
+                : null;
+
+            return GitHubLatestCommitResult.Success(new GitHubLatestCommit(committedAt.Value, shortSha, messageSummary));
+        }
+        catch (JsonException)
+        {
+            return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.Unexpected);
+        }
+    }
+
+    private static DateTimeOffset? TryGetPersonDate(JsonElement commitElement, string personPropertyName) =>
+        commitElement.TryGetProperty(personPropertyName, out var person) &&
+        person.ValueKind == JsonValueKind.Object &&
+        person.TryGetProperty("date", out var dateElement) &&
+        dateElement.ValueKind == JsonValueKind.String &&
+        DateTimeOffset.TryParse(dateElement.GetString(), out var parsed)
+            ? parsed
+            : null;
+
+    // Never the full SHA (see GitHubLatestCommit's doc comment) — 7
+    // characters matches GitHub's own short-SHA display convention.
+    private static string? TruncateSha(string? sha) =>
+        string.IsNullOrEmpty(sha) ? null : sha[..Math.Min(7, sha.Length)];
+
+    private static string? FirstLine(string? message)
+    {
+        if (string.IsNullOrEmpty(message))
+        {
+            return null;
+        }
+
+        var newlineIndex = message.IndexOf('\n');
+        var firstLine = newlineIndex < 0 ? message : message[..newlineIndex];
+        firstLine = firstLine.Trim();
+        return firstLine.Length == 0 ? null : firstLine;
     }
 
     private static GitHubRepositoryResult ParseRepository(string body)

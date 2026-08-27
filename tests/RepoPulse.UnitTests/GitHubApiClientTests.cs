@@ -1186,4 +1186,354 @@ public class GitHubApiClientTests
         Assert.Equal(["owner/A", "owner/B"], result.Repositories!.Select(r => r.FullName));
         Assert.Equal(2, handler.RequestCount);
     }
+
+    // --- GetLatestRepositoryCommitAsync (RP-013) ---
+    // No test here ever contacts the real GitHub network — every call goes
+    // through FakeHttpMessageHandler/ThrowingHttpMessageHandler, and no real
+    // GitHub token is ever used, only obviously-fake fixtures.
+
+    private static string SingleCommitJson(string? committerDate, string? authorDate, string sha = "abc1234567890def", string? message = "Fix parser bug\n\nLonger body here.")
+    {
+        var authorPart = authorDate is null ? "" : $"\"date\":\"{authorDate}\"";
+        var committerPart = committerDate is null ? "" : $"\"date\":\"{committerDate}\"";
+        var messagePart = message is null ? "" : $",\"message\":\"{JsonEscape(message)}\"";
+
+        return $"[{{\"sha\":\"{sha}\",\"commit\":{{\"author\":{{{authorPart}}},\"committer\":{{{committerPart}}}{messagePart}}}}}]";
+    }
+
+    private static string JsonEscape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
+
+    // 1. Correct endpoint and per_page=1.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_SendsExpectedRequestWithPerPageOne()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", null), Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        var request = handler.LastRequest!;
+        Assert.Equal("https://api.github.com/repos/mustafanazli/RepoPulse/commits?per_page=1", request.RequestUri!.ToString());
+    }
+
+    // 2. Owner/repository path encoding.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_EncodesOwnerAndRepositorySegments()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", null), Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        await client.GetLatestRepositoryCommitAsync("test-access-token", "owner name", "repo/name", CancellationToken.None);
+
+        var request = handler.LastRequest!;
+        Assert.Equal("https://api.github.com/repos/owner%20name/repo%2Fname/commits?per_page=1", request.RequestUri!.AbsoluteUri);
+    }
+
+    // 3. Authorization header present, token never in the query string.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_TokenOnlyInAuthorizationHeader_NeverInQuery()
+    {
+        const string token = "SUPER-SECRET-TOKEN-commit-abc123";
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", null), Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        await client.GetLatestRepositoryCommitAsync(token, "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        var request = handler.LastRequest!;
+        Assert.DoesNotContain(token, request.RequestUri!.ToString());
+        Assert.Null(request.Content);
+        Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+        Assert.Equal(token, request.Headers.Authorization.Parameter);
+        Assert.Equal("RepoPulse", request.Headers.UserAgent.ToString());
+        Assert.Equal("2022-11-28", request.Headers.GetValues("X-GitHub-Api-Version").Single());
+        Assert.Contains(request.Headers.Accept, h => h.MediaType == "application/vnd.github+json");
+    }
+
+    // 4. 200 with one commit → committer date used.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_SingleCommit_UsesCommitterDate()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", "2026-01-10T09:00:00Z"), Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.HasCommits);
+        Assert.Equal(DateTimeOffset.Parse("2026-01-15T10:30:00Z"), result.Commit!.CommittedAtUtc);
+    }
+
+    // 5. Committer date missing → falls back to author date.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_CommitterDateMissing_FallsBackToAuthorDate()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitJson(null, "2026-01-10T09:00:00Z"), Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.HasCommits);
+        Assert.Equal(DateTimeOffset.Parse("2026-01-10T09:00:00Z"), result.Commit!.CommittedAtUtc);
+    }
+
+    // 6. 200 with empty array → NoCommits, a success shape.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_EmptyArray_ReturnsNoCommitsSuccess()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("[]", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "EmptyRepo", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.False(result.HasCommits);
+        Assert.Null(result.Commit);
+        Assert.Null(result.FailureKind);
+    }
+
+    // 7. GitHub's 409 "empty repository" → also NoCommits, not a failure.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_Conflict409_ReturnsNoCommitsSuccess()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage((HttpStatusCode)409)
+        {
+            Content = new StringContent("""{"message":"Git Repository is empty."}""", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "EmptyRepo", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.False(result.HasCommits);
+        Assert.Null(result.Commit);
+    }
+
+    // 8. 401 → Unauthorized.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_Unauthorized_ReturnsUnauthorizedFailureKind()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubLatestCommitFailureKind.Unauthorized, result.FailureKind);
+    }
+
+    // 9 & 10. 403 and 429 → RateLimited.
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData((HttpStatusCode)429)]
+    public async Task GetLatestRepositoryCommitAsync_ForbiddenOrTooManyRequests_ReturnsRateLimitedFailureKind(HttpStatusCode statusCode)
+    {
+        const string marker = "RATE-LIMIT-BODY-MARKER-commit-9f3a";
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(statusCode)
+        {
+            Content = new StringContent($$"""{"message":"{{marker}}"}""", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubLatestCommitFailureKind.RateLimited, result.FailureKind);
+        Assert.Null(result.Commit);
+    }
+
+    // 11. 404 → NotFound.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_NotFound_ReturnsNotFoundFailureKind()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"message":"Not Found"}""", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "does-not-exist", CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubLatestCommitFailureKind.NotFound, result.FailureKind);
+    }
+
+    // 12. HttpRequestException → NetworkError.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_NetworkException_ReturnsNetworkErrorFailureKindSafely()
+    {
+        var handler = new ThrowingHttpMessageHandler(new HttpRequestException("connection refused"));
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubLatestCommitFailureKind.NetworkError, result.FailureKind);
+    }
+
+    // 13. WebException → NetworkError (Xamarin.Android raw-socket-failure shape).
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_WebException_ReturnsNetworkErrorFailureKindSafely()
+    {
+        var handler = new ThrowingHttpMessageHandler(new WebException("Socket closed"));
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubLatestCommitFailureKind.NetworkError, result.FailureKind);
+    }
+
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_Timeout_ReturnsNetworkErrorFailureKindSafely()
+    {
+        var handler = new ThrowingHttpMessageHandler(new TaskCanceledException("simulated timeout"));
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubLatestCommitFailureKind.NetworkError, result.FailureKind);
+    }
+
+    // 14. Malformed JSON → Unexpected.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_MalformedJson_ReturnsUnexpectedFailureAndDoesNotThrow()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{not valid", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubLatestCommitFailureKind.Unexpected, result.FailureKind);
+    }
+
+    // 15. Non-array JSON (e.g. a single object body) → Unexpected.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_NonArrayJson_ReturnsUnexpectedFailure()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"message":"not an array"}""", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubLatestCommitFailureKind.Unexpected, result.FailureKind);
+    }
+
+    // 16. A record is present but neither committer.date nor author.date is
+    // usable → Unexpected, never a fabricated date and never pushed_at/
+    // updated_at as a silent substitute.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_RecordWithoutEitherDate_ReturnsUnexpectedFailure()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitJson(null, null), Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubLatestCommitFailureKind.Unexpected, result.FailureKind);
+    }
+
+    // 17. Raw error bodies / the token never leak into the typed result.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_ErrorResponse_DoesNotExposeRawBodyOrToken()
+    {
+        const string token = "SUPER-SECRET-TOKEN-commit-error-abc123";
+        const string marker = "RAW-ERROR-BODY-MARKER-9f3a";
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.Forbidden)
+        {
+            Content = new StringContent($$"""{"message":"{{marker}}"}""", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync(token, "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        // The typed result carries no free-text field at all for failures —
+        // only the enum — so there is structurally nowhere for the raw body
+        // or the token to leak into.
+        Assert.Null(result.Commit);
+        var request = handler.LastRequest!;
+        Assert.DoesNotContain(token, request.RequestUri!.ToString());
+    }
+
+    // 18. Cancellation propagates rather than being swallowed as a generic failure.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_CancellationRequested_ThrowsOperationCanceled()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var handler = new ThrowingHttpMessageHandler(new OperationCanceledException());
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", cts.Token));
+    }
+
+    // Optional fields (short SHA, message summary) are parsed when present —
+    // never the full SHA, and only the first line of a multi-line message.
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_ParsesShortShaAndFirstLineOfMessage()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", null, sha: "abcdef1234567890", message: "Fix parser bug\n\nLonger body here."), Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal("abcdef1", result.Commit!.ShortSha);
+        Assert.Equal("Fix parser bug", result.Commit.MessageSummary);
+    }
+
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_MissingShaAndMessage_LeavesThemNull()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", null, sha: "", message: null), Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Null(result.Commit!.ShortSha);
+        Assert.Null(result.Commit.MessageSummary);
+    }
 }
