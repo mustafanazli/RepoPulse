@@ -1,3 +1,4 @@
+using System.Reflection;
 using RepoPulse.Core.Authentication;
 
 namespace RepoPulse.UnitTests;
@@ -128,5 +129,112 @@ public class UserSessionStoreTests
         store.SignIn(new UserSession("access-token", null, "octocat", null));
 
         Assert.NotEqual(firstGeneration, store.SessionGeneration);
+    }
+
+    // ---- CaptureSnapshot (atomic generation+login pair, non-sensitive) ----
+    //
+    // FavoriteToggleController's cross-session race fix depends on
+    // Generation and Login always describing the same sign-in — reading
+    // them as two separate SessionGeneration/Current calls cannot promise
+    // that under a concurrent SignOut/SignIn. UserSessionSnapshot
+    // deliberately carries ONLY Generation + Login — never the UserSession
+    // reference itself, which would give indirect access to
+    // AccessToken/RefreshToken that favorites scoping has no need for.
+
+    [Fact]
+    public void CaptureSnapshot_ReflectsCurrentGenerationAndLoginTogether()
+    {
+        var store = new UserSessionStore();
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+
+        var snapshot = store.CaptureSnapshot();
+
+        Assert.Equal(store.SessionGeneration, snapshot.Generation);
+        Assert.Equal(store.Current!.Login, snapshot.Login);
+    }
+
+    [Fact]
+    public void CaptureSnapshot_AfterSignOut_HasNullLoginAndBumpedGeneration()
+    {
+        var store = new UserSessionStore();
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+        var signedInSnapshot = store.CaptureSnapshot();
+
+        store.SignOut();
+        var signedOutSnapshot = store.CaptureSnapshot();
+
+        Assert.Null(signedOutSnapshot.Login);
+        Assert.NotEqual(signedInSnapshot.Generation, signedOutSnapshot.Generation);
+    }
+
+    [Fact]
+    public void CaptureSnapshot_BeforeAndAfterSwitchingAccounts_NeverPairsOldLoginWithNewGeneration()
+    {
+        var store = new UserSessionStore();
+        store.SignIn(new UserSession("access-token-a", null, "alice", null));
+        var aliceSnapshot = store.CaptureSnapshot();
+
+        store.SignOut();
+        store.SignIn(new UserSession("access-token-b", null, "bob", null));
+        var bobSnapshot = store.CaptureSnapshot();
+
+        Assert.NotEqual(aliceSnapshot.Generation, bobSnapshot.Generation);
+        Assert.Equal("alice", aliceSnapshot.Login);
+        Assert.Equal("bob", bobSnapshot.Login);
+    }
+
+    // ---- UserSessionSnapshot: structurally non-sensitive ----
+
+    [Fact]
+    public void UserSessionSnapshot_HasExactlyGenerationAndLoginProperties()
+    {
+        var propertyNames = typeof(UserSessionSnapshot).GetProperties().Select(p => p.Name).ToArray();
+
+        Assert.Equal(2, propertyNames.Length);
+        Assert.Contains(nameof(UserSessionSnapshot.Generation), propertyNames);
+        Assert.Contains(nameof(UserSessionSnapshot.Login), propertyNames);
+    }
+
+    [Fact]
+    public void UserSessionSnapshot_HasNoUserSessionOrTokenShapedField()
+    {
+        var fields = typeof(UserSessionSnapshot).GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+        foreach (var field in fields)
+        {
+            Assert.NotEqual(typeof(UserSession), field.FieldType);
+            Assert.DoesNotContain("Token", field.Name, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Secret", field.Name, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Avatar", field.Name, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    // ---- IsCurrent (token-free post-await re-check) ----
+
+    [Fact]
+    public void IsCurrent_ForFreshlyCapturedSnapshot_IsTrue()
+    {
+        var store = new UserSessionStore();
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+
+        var snapshot = store.CaptureSnapshot();
+
+        Assert.True(store.IsCurrent(snapshot));
+    }
+
+    [Fact]
+    public void IsCurrent_AfterAnySignInOrSignOut_IsFalseForThePreviouslyCapturedSnapshot()
+    {
+        var store = new UserSessionStore();
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+        var snapshot = store.CaptureSnapshot();
+
+        // Even signing back in as the exact same login must invalidate a
+        // previously captured snapshot — generation is the sole source of
+        // truth here, deliberately not compared against Login.
+        store.SignOut();
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+
+        Assert.False(store.IsCurrent(snapshot));
     }
 }

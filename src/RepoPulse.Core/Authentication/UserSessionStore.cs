@@ -42,6 +42,39 @@ public sealed class UserSessionStore
         get { lock (gate) { return sessionGeneration; } }
     }
 
+    // Reading SessionGeneration and Current as two separate lock acquisitions
+    // (as callers previously did) cannot guarantee they describe the same
+    // sign-in — a SignOut/SignIn can land between the two reads. Callers that
+    // must later verify, after an await, whether "their" session is still the
+    // active one (FavoriteToggleController's cross-session race fix) need
+    // both values captured together, under one lock acquisition. Only Login
+    // is carried alongside Generation — never the UserSession reference
+    // itself, since that would give a holder indirect access to
+    // AccessToken/RefreshToken it has no need for (favorites are scoped by
+    // login only).
+    public UserSessionSnapshot CaptureSnapshot()
+    {
+        lock (gate)
+        {
+            return new UserSessionSnapshot(sessionGeneration, current?.Login);
+        }
+    }
+
+    // Token-free re-check for a snapshot captured earlier: true only if no
+    // SignIn/SignOut has happened since (Generation alone is sufficient —
+    // every session change bumps it, including signing back into the same
+    // login, so a generation match already implies the login still matches).
+    // Callers that awaited a store call after CaptureSnapshot() should call
+    // this immediately before applying that call's result to any shared
+    // state.
+    public bool IsCurrent(UserSessionSnapshot snapshot)
+    {
+        lock (gate)
+        {
+            return sessionGeneration == snapshot.Generation;
+        }
+    }
+
     public void SignIn(UserSession session)
     {
         lock (gate)
@@ -65,3 +98,13 @@ public sealed class UserSessionStore
         }
     }
 }
+
+// Generation and Login are always read together from CaptureSnapshot(), so a
+// consumer that stashes one of these before an await and compares it against
+// UserSessionStore.IsCurrent(...) afterward can detect "the session changed
+// while I was awaiting" reliably. Deliberately carries ONLY these two
+// non-sensitive values — never the UserSession reference, AccessToken,
+// RefreshToken, AvatarUrl, or any token-derived value — since a favorites
+// snapshot has no legitimate need for anything beyond "which login" and
+// "which generation".
+public readonly record struct UserSessionSnapshot(long Generation, string? Login);

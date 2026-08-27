@@ -16,9 +16,15 @@ public sealed record RepositoryListItem(
     string UpdatedText,
     string? BadgeText,
     bool HasBadge,
-    GitHubRepository Repository)
+    GitHubRepository Repository,
+    // RP-012: whether this repository is currently a favorite, plus the
+    // Turkish label its toggle button should show. Defaults to false/"add"
+    // so every pre-RP-012 call site (production and test) that never passed
+    // a value keeps compiling and keeps its previous, correct behavior.
+    bool IsFavorite = false,
+    string FavoriteToggleLabel = "Favorilere ekle")
 {
-    public static RepositoryListItem FromRepository(GitHubRepository repository)
+    public static RepositoryListItem FromRepository(GitHubRepository repository, bool isFavorite = false)
     {
         var languageText = string.IsNullOrEmpty(repository.PrimaryLanguage)
             ? "Ana dil belirtilmemiş"
@@ -54,6 +60,8 @@ public sealed record RepositoryListItem(
             updatedText,
             badgeText,
             badgeText is not null,
-            repository);
+            repository,
+            isFavorite,
+            isFavorite ? "Favorilerden çıkar" : "Favorilere ekle");
     }
 }

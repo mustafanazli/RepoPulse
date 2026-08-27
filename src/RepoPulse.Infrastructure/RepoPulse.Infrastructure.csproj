@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- sqlite-net-pcl only — no EF Core/Dapper, no separately-pinned
+         SQLitePCLRaw provider. Its own transitive bundle_green dependency
+         supplies the native SQLite binaries for every RepoPulse target
+         (Android/iOS/MacCatalyst/Windows); see RP-012 report for the
+         restore/build/runtime verification that confirmed this is
+         sufficient without adding SQLitePCLRaw.bundle_green directly. -->
+    <PackageReference Include="sqlite-net-pcl" Version="1.11.285" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\RepoPulse.Core\RepoPulse.Core.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="RepoPulse.UnitTests" />
+  </ItemGroup>
+
+</Project>

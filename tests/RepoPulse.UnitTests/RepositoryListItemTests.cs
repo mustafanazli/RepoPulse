@@ -97,6 +97,29 @@ public class RepositoryListItemTests
         Assert.Equal(expectedBadge is not null, item.HasBadge);
     }
 
+    // RP-012: FromRepository's isFavorite parameter defaults to false so
+    // every pre-RP-012 call site above (which never passes it) keeps its
+    // original, correct behavior.
+    [Fact]
+    public void FromRepository_NoFavoriteArgument_DefaultsToNotFavorite()
+    {
+        var item = RepositoryListItem.FromRepository(MakeRepository());
+
+        Assert.False(item.IsFavorite);
+        Assert.Equal("Favorilere ekle", item.FavoriteToggleLabel);
+    }
+
+    [Theory]
+    [InlineData(false, "Favorilere ekle")]
+    [InlineData(true, "Favorilerden çıkar")]
+    public void FromRepository_IsFavorite_MapsToggleLabel(bool isFavorite, string expectedLabel)
+    {
+        var item = RepositoryListItem.FromRepository(MakeRepository(), isFavorite);
+
+        Assert.Equal(isFavorite, item.IsFavorite);
+        Assert.Equal(expectedLabel, item.FavoriteToggleLabel);
+    }
+
     // Selecting a list item must only ever be able to carry the repository
     // model onward — mirrors RepositoryNavigationQueryBuilderTests' proof
     // for the single-search flow (RP-007), now for the list-selection path.

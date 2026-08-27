@@ -1,6 +1,8 @@
 ﻿using Microsoft.Extensions.Logging;
 using RepoPulse.Authentication;
 using RepoPulse.Core.Authentication;
+using RepoPulse.Core.Repositories;
+using RepoPulse.Infrastructure.Favorites;
 
 namespace RepoPulse
 {
@@ -40,6 +42,20 @@ namespace RepoPulse
             {
                 Timeout = TimeSpan.FromSeconds(15)
             }));
+
+            // RP-012: FavoriteToggleController is a singleton — the exact
+            // same instance is injected into RepositoryListPage AND
+            // RepositoryDetailPage, so a favorite toggled on one page is
+            // already reflected on the other the moment you navigate there,
+            // with no separate reload/sync step. The real on-disk database
+            // lives at AppDataDirectory/repopulse.db3 — RepoPulse.Infrastructure
+            // itself never references FileSystem, only the absolute path
+            // constructed here.
+            builder.Services.AddSingleton(TimeProvider.System);
+            builder.Services.AddSingleton<IFavoriteRepositoryStore>(_ =>
+                new SqliteFavoriteRepositoryStore(new SqliteFavoriteRepositoryStoreOptions(
+                    Path.Combine(FileSystem.AppDataDirectory, "repopulse.db3"))));
+            builder.Services.AddSingleton<FavoriteToggleController>();
 
             builder.Services.AddTransient<AppShell>();
             builder.Services.AddTransient<BootstrapPage>();

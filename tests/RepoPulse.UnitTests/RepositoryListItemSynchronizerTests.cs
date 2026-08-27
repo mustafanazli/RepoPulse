@@ -131,6 +131,57 @@ public class RepositoryListItemSynchronizerTests
         Assert.Single(current, i => string.Equals(i.FullName, "MUSTAFANAZLI/REPOPULSE", StringComparison.Ordinal));
     }
 
+    // RP-012: toggling a favorite is just another data change on an
+    // already-present row (favorite state lives on RepositoryListItem
+    // itself) — it must go through the same indexer-replace path as any
+    // other in-place update, never a remove+reinsert and never a Reset.
+    [Fact]
+    public void Sync_FavoriteStateChangeOnExistingItem_ReplacesInPlaceWithoutMoveOrReset()
+    {
+        var current = new ObservableCollection<RepositoryListItem> { MakeItem("owner/A"), MakeItem("owner/B") };
+        var actions = new List<NotifyCollectionChangedAction>();
+        current.CollectionChanged += (_, e) => actions.Add(e.Action);
+
+        var repository = MakeRepository("owner/A");
+        var favoritedA = RepositoryListItem.FromRepository(repository, isFavorite: true);
+        RepositoryListItemSynchronizer.Sync(current, new List<RepositoryListItem> { favoritedA, MakeItem("owner/B") });
+
+        Assert.Equal(new[] { "owner/A", "owner/B" }, current.Select(i => i.FullName));
+        Assert.True(current[0].IsFavorite);
+        Assert.False(current[1].IsFavorite);
+        Assert.DoesNotContain(NotifyCollectionChangedAction.Reset, actions);
+        Assert.DoesNotContain(NotifyCollectionChangedAction.Move, actions);
+    }
+
+    // The generic Sync<TItem> overload (introduced for RP-012's mixed
+    // RepositoryListItem/FavoriteIdentityRow "Favoriler" rows) must behave
+    // identically to the RepositoryListItem-specific overload above for the
+    // same scenario — same insert/remove/reorder/no-Reset guarantees, just
+    // with an explicit key selector instead of the implicit FullName one.
+    [Fact]
+    public void GenericSync_MixedObjectRows_SyncsByExplicitKeySelectorWithoutReset()
+    {
+        var current = new ObservableCollection<object>();
+        var resetRaised = false;
+        current.CollectionChanged += (_, e) => resetRaised |= e.Action == NotifyCollectionChangedAction.Reset;
+
+        static string KeyOf(object row) => row switch
+        {
+            RepositoryListItem item => item.FullName,
+            string identity => identity,
+            _ => throw new InvalidOperationException()
+        };
+
+        RepositoryListItemSynchronizer.Sync(current, new List<object> { MakeItem("owner/A"), "owner/Offline" }, KeyOf);
+        Assert.Equal(2, current.Count);
+
+        RepositoryListItemSynchronizer.Sync(current, new List<object> { "owner/Offline" }, KeyOf);
+        var remaining = Assert.Single(current);
+        Assert.Equal("owner/Offline", remaining);
+
+        Assert.False(resetRaised);
+    }
+
     [Fact]
     public void Sync_NeverRaisesResetAction()
     {
