@@ -55,8 +55,11 @@ public sealed class FavoriteToggleController
     // favorite-toggle UI can be interacted with.
     public async Task EnsureLoadedForCurrentSessionAsync(CancellationToken cancellationToken)
     {
-        var currentGeneration = userSessionStore.SessionGeneration;
-        if (loadedForSessionGeneration == currentGeneration)
+        // Generation and login are captured together — reading them as two
+        // separate UserSessionStore calls could tear across a concurrent
+        // SignOut/SignIn and load for the wrong account.
+        var snapshot = userSessionStore.CaptureSnapshot();
+        if (loadedForSessionGeneration == snapshot.Generation)
         {
             return;
         }
@@ -67,14 +70,26 @@ public sealed class FavoriteToggleController
         favoritesByKey.Clear();
         LastLoadFailure = null;
 
-        var session = userSessionStore.Current;
-        if (session is null)
+        if (snapshot.Session is null)
         {
-            loadedForSessionGeneration = currentGeneration;
+            loadedForSessionGeneration = snapshot.Generation;
             return;
         }
 
-        var result = await store.GetAllAsync(session.Login, cancellationToken).ConfigureAwait(false);
+        var result = await store.GetAllAsync(snapshot.Session.Login, cancellationToken).ConfigureAwait(false);
+
+        // The session may have changed (sign-out, switch to another account,
+        // or even a fresh sign-in as the same account) while the await above
+        // was in flight. Applying this result now would publish the captured
+        // session's favorites into whichever session is actually active —
+        // discard it instead; the session that is now current already
+        // cleared this same state above (on its own call) or will on its
+        // next EnsureLoadedForCurrentSessionAsync call.
+        if (userSessionStore.SessionGeneration != snapshot.Generation)
+        {
+            return;
+        }
+
         if (result.IsSuccess)
         {
             foreach (var favorite in result.Favorites)
@@ -87,7 +102,7 @@ public sealed class FavoriteToggleController
             LastLoadFailure = result.FailureKind;
         }
 
-        loadedForSessionGeneration = currentGeneration;
+        loadedForSessionGeneration = snapshot.Generation;
     }
 
     public bool IsFavorite(string owner, string name) =>
@@ -102,8 +117,12 @@ public sealed class FavoriteToggleController
     // scoped to whoever is signed in right now.
     public async Task<FavoriteToggleResult> ToggleAsync(string owner, string name, CancellationToken cancellationToken)
     {
-        var session = userSessionStore.Current;
-        if (session is null)
+        // Captured together (see EnsureLoadedForCurrentSessionAsync) so the
+        // DB write below always targets the account that was actually
+        // active when this call started, never a login read moments later
+        // from a different lock acquisition.
+        var snapshot = userSessionStore.CaptureSnapshot();
+        if (snapshot.Session is null)
         {
             return FavoriteToggleResult.Failure(FavoriteStoreFailureKind.Unexpected);
         }
@@ -124,8 +143,20 @@ public sealed class FavoriteToggleController
             var addedAtUtc = timeProvider.GetUtcNow();
 
             var result = wasFavorite
-                ? await store.RemoveAsync(session.Login, identity.Owner, identity.Name, cancellationToken).ConfigureAwait(false)
-                : await store.AddAsync(session.Login, identity.Owner, identity.Name, addedAtUtc, cancellationToken).ConfigureAwait(false);
+                ? await store.RemoveAsync(snapshot.Session.Login, identity.Owner, identity.Name, cancellationToken).ConfigureAwait(false)
+                : await store.AddAsync(snapshot.Session.Login, identity.Owner, identity.Name, addedAtUtc, cancellationToken).ConfigureAwait(false);
+
+            // The session may have changed while the store call above was in
+            // flight. The write itself already landed correctly scoped to
+            // the account captured above — that stands — but applying its
+            // outcome to the shared in-memory dictionary now would leak that
+            // account's change into whichever session is active today, so it
+            // is discarded here instead of ever reaching Favorites/IsFavorite
+            // or a caller's UI re-render.
+            if (userSessionStore.SessionGeneration != snapshot.Generation)
+            {
+                return FavoriteToggleResult.Ignored();
+            }
 
             if (!result.IsSuccess)
             {

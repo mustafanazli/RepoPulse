@@ -129,4 +129,53 @@ public class UserSessionStoreTests
 
         Assert.NotEqual(firstGeneration, store.SessionGeneration);
     }
+
+    // ---- CaptureSnapshot (atomic generation+login pair) ----
+    //
+    // FavoriteToggleController's cross-session race fix depends on
+    // Generation and Session always describing the same sign-in — reading
+    // them as two separate SessionGeneration/Current calls cannot promise
+    // that under a concurrent SignOut/SignIn.
+
+    [Fact]
+    public void CaptureSnapshot_ReflectsCurrentSessionAndGenerationTogether()
+    {
+        var store = new UserSessionStore();
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+
+        var snapshot = store.CaptureSnapshot();
+
+        Assert.Equal(store.SessionGeneration, snapshot.Generation);
+        Assert.Same(store.Current, snapshot.Session);
+    }
+
+    [Fact]
+    public void CaptureSnapshot_AfterSignOut_HasNullSessionAndBumpedGeneration()
+    {
+        var store = new UserSessionStore();
+        store.SignIn(new UserSession("access-token", null, "octocat", null));
+        var signedInSnapshot = store.CaptureSnapshot();
+
+        store.SignOut();
+        var signedOutSnapshot = store.CaptureSnapshot();
+
+        Assert.Null(signedOutSnapshot.Session);
+        Assert.NotEqual(signedInSnapshot.Generation, signedOutSnapshot.Generation);
+    }
+
+    [Fact]
+    public void CaptureSnapshot_BeforeAndAfterSwitchingAccounts_NeverPairsOldLoginWithNewGeneration()
+    {
+        var store = new UserSessionStore();
+        store.SignIn(new UserSession("access-token-a", null, "alice", null));
+        var aliceSnapshot = store.CaptureSnapshot();
+
+        store.SignOut();
+        store.SignIn(new UserSession("access-token-b", null, "bob", null));
+        var bobSnapshot = store.CaptureSnapshot();
+
+        Assert.NotEqual(aliceSnapshot.Generation, bobSnapshot.Generation);
+        Assert.Equal("alice", aliceSnapshot.Session!.Login);
+        Assert.Equal("bob", bobSnapshot.Session!.Login);
+    }
 }

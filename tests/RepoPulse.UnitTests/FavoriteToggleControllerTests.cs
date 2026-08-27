@@ -34,20 +34,31 @@ public class FavoriteToggleControllerTests
         public int RemoveCallCount { get; private set; }
         public TaskCompletionSource<bool>? BlockNextOperationUntil { get; set; }
 
+        // Separate gate from BlockNextOperationUntil (which only blocks
+        // AddAsync/RemoveAsync) — needed to simulate a GetAllAsync call
+        // that is still in flight when the session changes underneath it.
+        public TaskCompletionSource<bool>? BlockNextGetAllUntil { get; set; }
+
         public async Task<FavoriteStoreResult> InitializeAsync(CancellationToken cancellationToken) =>
             await Task.FromResult(FavoriteStoreResult.Success());
 
-        public Task<FavoriteListResult> GetAllAsync(string accountLogin, CancellationToken cancellationToken)
+        public async Task<FavoriteListResult> GetAllAsync(string accountLogin, CancellationToken cancellationToken)
         {
+            if (BlockNextGetAllUntil is { } gate)
+            {
+                BlockNextGetAllUntil = null;
+                await gate.Task;
+            }
+
             if (FailNextOperation is { } kind)
             {
                 FailNextOperation = null;
-                return Task.FromResult(FavoriteListResult.Failure(kind));
+                return FavoriteListResult.Failure(kind);
             }
 
             FavoriteRepositoryIdentifier.TryNormalizeAccountLogin(accountLogin, out var normalizedAccount);
             var scoped = favorites.Where(entry => entry.Key.Account == normalizedAccount).Select(entry => entry.Value).ToList();
-            return Task.FromResult(FavoriteListResult.Success(scoped));
+            return FavoriteListResult.Success(scoped);
         }
 
         public async Task<FavoriteStoreResult> AddAsync(string accountLogin, string owner, string name, DateTimeOffset addedAtUtc, CancellationToken cancellationToken)
@@ -421,6 +432,121 @@ public class FavoriteToggleControllerTests
         var bobsFavorites = await store.GetAllAsync("bob", CancellationToken.None);
         Assert.Single(alicesFavorites.Favorites);
         Assert.Single(bobsFavorites.Favorites);
+    }
+
+    // ---- Cross-session async race safety ----
+    //
+    // These prove the fix for a second, subtler leak on top of the plain
+    // per-account scoping above: EnsureLoadedForCurrentSessionAsync/
+    // ToggleAsync both await a store call, and — before this fix — resumed
+    // by unconditionally writing into the shared favoritesByKey dictionary
+    // using whatever session/login was captured *before* that await. If a
+    // sign-out/sign-in landed while the await was in flight, the resumed
+    // continuation would publish the OLD account's data into what is now a
+    // DIFFERENT account's in-memory state. The fix re-checks
+    // UserSessionStore.SessionGeneration right before every such mutation
+    // and discards (never applies) a result whose captured generation no
+    // longer matches.
+
+    [Fact]
+    public async Task DelayedLoadForAccountA_CompletesAfterAccountBSignIn_DoesNotPublishAState()
+    {
+        var store = new FakeFavoriteRepositoryStore();
+        await store.AddAsync("alice", "owner", "name", DateTimeOffset.UtcNow, CancellationToken.None);
+        var gate = new TaskCompletionSource<bool>();
+        store.BlockNextGetAllUntil = gate;
+        var userSessionStore = SignedInAs("alice");
+        var controller = MakeController(store, userSessionStore);
+
+        // Starts loading for alice; GetAllAsync("alice", ...) is now
+        // suspended on `gate`.
+        var loadTask = controller.EnsureLoadedForCurrentSessionAsync(CancellationToken.None);
+
+        // Alice's session ends and Bob's begins while that load is still
+        // in flight.
+        userSessionStore.SignOut();
+        userSessionStore.SignIn(new UserSession("fake-access-token-b", null, "bob", null));
+
+        // Let alice's GetAllAsync resolve now that bob is the active session.
+        gate.SetResult(true);
+        await loadTask;
+
+        // Alice's favorite must never surface for bob, even transiently —
+        // the late result is discarded, not merged into shared state.
+        Assert.Empty(controller.Favorites);
+        Assert.False(controller.IsFavorite("owner", "name"));
+    }
+
+    [Fact]
+    public async Task DelayedToggleForAccountA_CompletesAfterAccountBSignIn_DoesNotPublishAState()
+    {
+        var store = new FakeFavoriteRepositoryStore();
+        var gate = new TaskCompletionSource<bool>();
+        store.BlockNextOperationUntil = gate;
+        var userSessionStore = SignedInAs("alice");
+        var controller = MakeController(store, userSessionStore);
+
+        // Starts toggling (adding) for alice; AddAsync is now suspended on
+        // `gate`.
+        var toggleTask = controller.ToggleAsync("owner", "name", CancellationToken.None);
+
+        userSessionStore.SignOut();
+        userSessionStore.SignIn(new UserSession("fake-access-token-b", null, "bob", null));
+
+        gate.SetResult(true);
+        var result = await toggleTask;
+
+        // The stale outcome must be reported as Ignored (never Success),
+        // and never applied to shared in-memory state now that bob is
+        // active.
+        Assert.True(result.IsIgnored);
+        Assert.False(controller.IsFavorite("owner", "name"));
+        Assert.Empty(controller.Favorites);
+
+        // The DB write itself already landed correctly scoped to the
+        // account that was actually active when ToggleAsync started —
+        // that is a real, intentional write and must stand; it is only the
+        // in-memory publication to the (now different) active session that
+        // is suppressed.
+        var alicesFavorites = await store.GetAllAsync("alice", CancellationToken.None);
+        Assert.Single(alicesFavorites.Favorites);
+        var bobsFavorites = await store.GetAllAsync("bob", CancellationToken.None);
+        Assert.Empty(bobsFavorites.Favorites);
+    }
+
+    [Fact]
+    public async Task SameAccountNewGeneration_ReloadsRatherThanReusingStaleData()
+    {
+        var store = new FakeFavoriteRepositoryStore();
+        var userSessionStore = SignedInAs("alice");
+        var controller = MakeController(store, userSessionStore);
+        await controller.ToggleAsync("owner", "first", CancellationToken.None);
+        await controller.EnsureLoadedForCurrentSessionAsync(CancellationToken.None);
+        Assert.Single(controller.Favorites);
+
+        // Sign back in as the same login — a new SessionGeneration even
+        // though the account identity is unchanged (e.g. a token refresh
+        // re-authentication) — and add a second favorite directly via the
+        // store, bypassing the controller, to prove the next call performs
+        // a real reload rather than trusting stale in-memory state.
+        userSessionStore.SignIn(new UserSession("fake-access-token", null, "alice", null));
+        await store.AddAsync("alice", "owner", "second", DateTimeOffset.UtcNow, CancellationToken.None);
+        await controller.EnsureLoadedForCurrentSessionAsync(CancellationToken.None);
+
+        Assert.Equal(2, controller.Favorites.Count);
+    }
+
+    [Fact]
+    public void UserSessionSnapshot_HasNoTokenOrSecretShapedProperty()
+    {
+        var properties = typeof(UserSessionSnapshot).GetProperties();
+
+        Assert.All(properties, property =>
+        {
+            Assert.DoesNotContain("Token", property.Name, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Secret", property.Name, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Hash", property.Name, StringComparison.OrdinalIgnoreCase);
+        });
     }
 
     // Structural proof mirroring RepositoryListControllerTests'
