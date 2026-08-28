@@ -312,6 +312,14 @@ Issue'lar:
 - [x] Repository listesi gerçek API'den geliyor; arama, sıralama ve favori ekleme/çıkarma çalışıyor ve favoriler cihaz yeniden başlatıldığında kalıcı — **RP-010 (gerçek API), RP-011 (yerel arama/sıralama), RP-012 (favori ekleme/çıkarma + SQLite kalıcılığı) ile karşılandı**
 - [x] Repo detay ekranı gerçek verilerle (dil, star, fork, açık issue/PR sayısı, son commit tarihi) doluyor — **RP-006 (dil/star/fork/açık issue+PR) + RP-013 (son commit tarihi) ile karşılandı**
 - [ ] Ağ bağlantısı kesikken (uçak modu) istek denemesi çöküşe yol açmıyor, hata durumu ekranda gösteriliyor
+  - **Denetim notu (RP-013 sonrası güvenlik/yarış denetimi, 2026-08-28):** Bu kriter altı ana ekranın tamamı için tek bir RP'nin kanıtıyla kapatılamaz; ekran bazında kanıt durumu:
+    - Repository listesi — **doğrudan canlı kanıt: RP-010** (Wi-Fi/veri `adb shell svc` ile kapatıldı, force-stop+relaunch, "GitHub'a ulaşılamadı." güvenli mesajı, çökme yok)
+    - Favoriler/offline görünüm — **doğrudan canlı kanıt: RP-012**
+    - Repo detay/son commit — **doğrudan canlı kanıt: RP-013** (bu denetim penceresi; ağ kapalıyken "Son commit bilgisi alınamadı." güvenli mesajı, çökme yok)
+    - Giriş/OAuth akışı (AppShell/login, RP-007) ve oturum kalıcılığı (RP-008) — **yalnızca dolaylı kanıt**: `BootstrapPage`'in soğuk başlatma restore akışı hiç ağ çağrısı yapmıyor (RP-008), ve `ExchangeAsync`/`GetCurrentUserAsync` genel `WebException` işleyişi organik bir geçmiş hata-düzeltmesiyle doğrulandı (RP-006) — ama OAuth exchange akışının kendisi için uçak-modu-özel canlı bir test yapılmadı
+    - Tek repository araması — **yalnızca dolaylı kanıt**: aynı `WebException`/`HttpRequestException` işleyişi `GetRepositoryAsync` için de geçerli (RP-006), ama uçak-modu-özel canlı bir test yapılmadı
+    - Ayarlar (`SettingsPage`) — **N/A**: hiçbir ağ çağrısı yapmıyor (`gitHubApiClient`/`HttpClient`/`GetAsync`/`SendAsync` kullanımı yok)
+    - Sonuç: kutu kasıtlı olarak işaretlenmedi — giriş/OAuth ve tek repo araması için uçak-modu-özel canlı doğrulama eksik. Bu yalnızca plan-doküman doğruluğu notudur; yeni offline özellik geliştirmesi başlatılmadı.
 
 ### Faz 2 — Analiz motoru
 

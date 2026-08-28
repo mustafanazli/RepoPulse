@@ -25,17 +25,14 @@ public partial class RepositoryDetailPage : ContentPage, IQueryAttributable
     private readonly SessionPersistenceStore sessionPersistenceStore;
     private GitHubRepository? currentRepository;
 
-    // RP-013: guards against a second concurrent latest-commit request (a
-    // fast re-appear after backgrounding the app, or any other double
-    // OnAppearing) — mirrors the isFetchingFavoriteDetail/
-    // isNavigatingToDetail guards already used in RepositoryListPage.
-    private bool isLoadingLatestCommit;
-    private CancellationTokenSource? latestCommitLoadCts;
-    // Set right before this page cancels an in-flight latest-commit request
-    // itself (OnDisappearing) — distinguishes "the page is navigating away"
-    // from a genuine request timeout, both of which surface as the same
-    // OperationCanceledException. Only the latter is shown as an error.
-    private bool latestCommitLoadCancelledByNavigation;
+    // RP-013 (hardened): owns which latest-commit load is "current" via an
+    // explicit, monotonic operation id (RepoPulse.Core, unit-tested in
+    // isolation) rather than a bare bool + a single shared
+    // CancellationTokenSource — a superseded operation's own catch/finally,
+    // however delayed, can never clear this page's loading flag, cancel a
+    // newer operation's token, or overwrite a newer result once a new
+    // operation has started. See LatestCommitLoadCoordinator's doc comment.
+    private readonly LatestCommitLoadCoordinator latestCommitCoordinator = new();
 
     public RepositoryDetailPage(
         FavoriteToggleController favoriteToggleController,
@@ -63,8 +60,7 @@ public partial class RepositoryDetailPage : ContentPage, IQueryAttributable
         base.OnDisappearing();
         // Never leaves an HTTP request running once the user has navigated
         // away from this page.
-        latestCommitLoadCancelledByNavigation = true;
-        latestCommitLoadCts?.Cancel();
+        latestCommitCoordinator.CancelForNavigation();
     }
 
     private void Render(GitHubRepository repository)
@@ -111,23 +107,23 @@ public partial class RepositoryDetailPage : ContentPage, IQueryAttributable
 
     // RP-013: fetches GET /repos/{owner}/{repository}/commits?per_page=1 —
     // the single-repository summary this page is already rendering has no
-    // commit data. Guarded against overlap by isLoadingLatestCommit; a
+    // commit data. Guarded against overlap by latestCommitCoordinator; a
     // stale in-flight request from a previous appearance is always
-    // cancelled first via latestCommitLoadCts.
+    // cancelled first via CancelForNavigation (OnDisappearing). Every
+    // resumption point below re-checks IsCurrent(operationId) immediately
+    // before touching any shared UI/session state, so a superseded
+    // operation's belated continuation can never win a race against a
+    // newer one — see LatestCommitLoadCoordinator's doc comment for why a
+    // bare bool + single CancellationTokenSource could not guarantee this.
     private async Task LoadLatestCommitAsync(GitHubRepository repository)
     {
-        if (isLoadingLatestCommit)
+        if (latestCommitCoordinator.HasActiveOperation)
         {
             return;
         }
 
-        isLoadingLatestCommit = true;
-        latestCommitLoadCancelledByNavigation = false;
+        var operation = latestCommitCoordinator.StartOperation(RequestTimeout);
         SetLatestCommitLoading();
-
-        latestCommitLoadCts?.Dispose();
-        var cts = new CancellationTokenSource(RequestTimeout);
-        latestCommitLoadCts = cts;
 
         try
         {
@@ -141,23 +137,40 @@ public partial class RepositoryDetailPage : ContentPage, IQueryAttributable
 
             if (accessToken is null)
             {
-                SetLatestCommitError(GenericLatestCommitFailureMessage);
+                if (latestCommitCoordinator.IsCurrent(operation.OperationId))
+                {
+                    SetLatestCommitError(GenericLatestCommitFailureMessage);
+                }
+
                 return;
             }
 
             GitHubLatestCommitResult result;
             try
             {
-                result = await gitHubApiClient.GetLatestRepositoryCommitAsync(accessToken, repository.Owner, repository.Name, cts.Token);
+                result = await gitHubApiClient.GetLatestRepositoryCommitAsync(accessToken, repository.Owner, repository.Name, operation.Token);
             }
             catch (OperationCanceledException)
             {
-                if (latestCommitLoadCancelledByNavigation)
+                if (!latestCommitCoordinator.IsCurrent(operation.OperationId))
+                {
+                    return;
+                }
+
+                if (latestCommitCoordinator.WasCancelledForNavigation(operation.OperationId))
                 {
                     return;
                 }
 
                 SetLatestCommitError(GenericLatestCommitFailureMessage);
+                return;
+            }
+
+            if (!latestCommitCoordinator.IsCurrent(operation.OperationId))
+            {
+                // A newer load has already started (or this page is
+                // navigating away) — this result belongs to a superseded
+                // operation and must never reach the UI.
                 return;
             }
 
@@ -191,7 +204,7 @@ public partial class RepositoryDetailPage : ContentPage, IQueryAttributable
         }
         finally
         {
-            isLoadingLatestCommit = false;
+            latestCommitCoordinator.CompleteOperation(operation.OperationId);
         }
     }
 

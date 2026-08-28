@@ -545,15 +545,13 @@ public sealed class GitHubApiClient : IGitHubApiClient
                 return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.Unexpected);
             }
 
-            string? shortSha = first.TryGetProperty("sha", out var shaElement) && shaElement.ValueKind == JsonValueKind.String
-                ? TruncateSha(shaElement.GetString())
-                : null;
-
-            string? messageSummary = commitElement.TryGetProperty("message", out var messageElement) && messageElement.ValueKind == JsonValueKind.String
-                ? FirstLine(messageElement.GetString())
-                : null;
-
-            return GitHubLatestCommitResult.Success(new GitHubLatestCommit(committedAt.Value, shortSha, messageSummary));
+            // Deliberately reads nothing else from `first`/`commitElement` —
+            // no sha, no commit message. RepositoryDetailPage shows only the
+            // date; GitHub's commit SHA/message are real content the app has
+            // no UI use for, so they are never extracted, retained, or able
+            // to reach a log/exception/route in the first place (data
+            // minimization — see GitHubLatestCommit's doc comment).
+            return GitHubLatestCommitResult.Success(new GitHubLatestCommit(committedAt.Value));
         }
         catch (JsonException)
         {
@@ -569,24 +567,6 @@ public sealed class GitHubApiClient : IGitHubApiClient
         DateTimeOffset.TryParse(dateElement.GetString(), out var parsed)
             ? parsed
             : null;
-
-    // Never the full SHA (see GitHubLatestCommit's doc comment) — 7
-    // characters matches GitHub's own short-SHA display convention.
-    private static string? TruncateSha(string? sha) =>
-        string.IsNullOrEmpty(sha) ? null : sha[..Math.Min(7, sha.Length)];
-
-    private static string? FirstLine(string? message)
-    {
-        if (string.IsNullOrEmpty(message))
-        {
-            return null;
-        }
-
-        var newlineIndex = message.IndexOf('\n');
-        var firstLine = newlineIndex < 0 ? message : message[..newlineIndex];
-        firstLine = firstLine.Trim();
-        return firstLine.Length == 0 ? null : firstLine;
-    }
 
     private static GitHubRepositoryResult ParseRepository(string body)
     {

@@ -15,11 +15,13 @@ public enum GitHubLatestCommitFailureKind
 }
 
 // Owner/name/repository identity is deliberately NOT carried here — a caller
-// already has that from the GitHubRepository it navigated with. ShortSha and
-// MessageSummary are optional, sourced from the exact same JSON payload as
-// CommittedAtUtc (no extra request), and are never the full SHA — see
-// GitHubApiClient.ParseLatestCommit for the truncation.
-public sealed record GitHubLatestCommit(DateTimeOffset CommittedAtUtc, string? ShortSha, string? MessageSummary);
+// already has that from the GitHubRepository it navigated with. Carries
+// ONLY CommittedAtUtc — RepositoryDetailPage's "Son commit" label shows
+// nothing else, so an earlier version's ShortSha/MessageSummary fields were
+// dead data: GitHub's commit SHA and message are never retained, logged, or
+// displayed anywhere in this app. Re-add a field here only when a real UI
+// use appears, with its own validation/truncation at parse time.
+public sealed record GitHubLatestCommit(DateTimeOffset CommittedAtUtc);
 
 // Mirrors GitHubRepositoryResult's typed-failure pattern, but with a third,
 // explicit success shape: a repository that exists and returned 200 with an

@@ -1201,7 +1201,12 @@ public class GitHubApiClientTests
         return $"[{{\"sha\":\"{sha}\",\"commit\":{{\"author\":{{{authorPart}}},\"committer\":{{{committerPart}}}{messagePart}}}}}]";
     }
 
-    private static string JsonEscape(string value) => value.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\n", "\\n");
+    private static string JsonEscape(string value) => value
+        .Replace("\\", "\\\\")
+        .Replace("\"", "\\\"")
+        .Replace("\n", "\\n")
+        .Replace("\r", "\\r")
+        .Replace("\t", "\\t");
 
     // 1. Correct endpoint and per_page=1.
     [Fact]
@@ -1503,37 +1508,90 @@ public class GitHubApiClientTests
             () => client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", cts.Token));
     }
 
-    // Optional fields (short SHA, message summary) are parsed when present —
-    // never the full SHA, and only the first line of a multi-line message.
+    // --- Data minimization (RP-013 audit) ---
+    //
+    // GitHubLatestCommit carries ONLY CommittedAtUtc — RepositoryDetailPage
+    // never shows a SHA or commit message, so the parser must never extract,
+    // retain, or leak either, no matter what shape GitHub's own "sha"/
+    // "message" fields take in the raw response.
+
     [Fact]
-    public async Task GetLatestRepositoryCommitAsync_ParsesShortShaAndFirstLineOfMessage()
+    public void GitHubLatestCommit_HasExactlyOneProperty_CommittedAtUtc()
     {
-        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
-        {
-            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", null, sha: "abcdef1234567890", message: "Fix parser bug\n\nLonger body here."), Encoding.UTF8, "application/json")
-        });
-        var client = new GitHubApiClient(new HttpClient(handler));
+        var properties = typeof(GitHubLatestCommit).GetProperties();
 
-        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
-
-        Assert.True(result.IsSuccess);
-        Assert.Equal("abcdef1", result.Commit!.ShortSha);
-        Assert.Equal("Fix parser bug", result.Commit.MessageSummary);
+        var property = Assert.Single(properties);
+        Assert.Equal(nameof(GitHubLatestCommit.CommittedAtUtc), property.Name);
     }
 
     [Fact]
-    public async Task GetLatestRepositoryCommitAsync_MissingShaAndMessage_LeavesThemNull()
+    public async Task GetLatestRepositoryCommitAsync_VeryLongCommitMessage_IsIgnoredAndNeverSurfaced()
     {
+        var longMessage = new string('A', 50_000);
         var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
         {
-            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", null, sha: "", message: null), Encoding.UTF8, "application/json")
+            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", null, message: longMessage), Encoding.UTF8, "application/json")
         });
         var client = new GitHubApiClient(new HttpClient(handler));
 
         var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
 
         Assert.True(result.IsSuccess);
-        Assert.Null(result.Commit!.ShortSha);
-        Assert.Null(result.Commit.MessageSummary);
+        Assert.Equal(DateTimeOffset.Parse("2026-01-15T10:30:00Z"), result.Commit!.CommittedAtUtc);
+        Assert.DoesNotContain(longMessage, result.Commit.ToString());
+    }
+
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_MessageWithControlCharacters_IsIgnoredAndNeverSurfaced()
+    {
+        const string controlCharacterMessage = "line one\r\nline two\tembedded-tabbell";
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", null, message: controlCharacterMessage), Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(DateTimeOffset.Parse("2026-01-15T10:30:00Z"), result.Commit!.CommittedAtUtc);
+        Assert.DoesNotContain("embedded-tab", result.Commit.ToString());
+    }
+
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_InvalidShaShape_IsIgnoredAndDoesNotFail()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", null, sha: "not-a-valid-hex-sha!!"), Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        // An invalid/unexpected "sha" shape has no bearing on the outcome —
+        // it is simply never read.
+        Assert.True(result.IsSuccess);
+        Assert.Equal(DateTimeOffset.Parse("2026-01-15T10:30:00Z"), result.Commit!.CommittedAtUtc);
+    }
+
+    [Fact]
+    public async Task GetLatestRepositoryCommitAsync_RawShaAndMessage_NeverAppearInResultToString()
+    {
+        const string marker = "MARKER-COMMIT-MESSAGE-CONTENT-9f3a";
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitJson("2026-01-15T10:30:00Z", null, sha: "0123456789abcdef0123456789abcdef01234567", message: marker), Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetLatestRepositoryCommitAsync("test-access-token", "mustafanazli", "RepoPulse", CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        // GitHubLatestCommit is a record with a single DateTimeOffset
+        // property — ToString() structurally cannot contain the raw sha or
+        // message, since neither is a property on the type at all.
+        Assert.DoesNotContain(marker, result.Commit!.ToString());
+        Assert.DoesNotContain("0123456789abcdef0123456789abcdef01234567", result.Commit.ToString());
     }
 }
