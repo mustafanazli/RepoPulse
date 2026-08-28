@@ -34,6 +34,16 @@
                 x:Name="RepositoryPushedLabel" />
 
             <Label
+                x:Name="LatestCommitLabel"
+                SemanticProperties.Hint="Repository'nin son commit tarihi" />
+
+            <ActivityIndicator
+                x:Name="LatestCommitLoadingIndicator"
+                IsVisible="False"
+                IsRunning="False"
+                SemanticProperties.Description="Son commit bilgisi yükleniyor" />
+
+            <Label
                 x:Name="RepositoryBadgesLabel"
                 IsVisible="False"
                 FontAttributes="Italic" />
