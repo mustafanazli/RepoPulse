@@ -143,10 +143,29 @@ public partial class LoginPage : ContentPage
 
         using var cts = new CancellationTokenSource(RequestTimeout);
 
-        var exchangeResult = await authApiClient.ExchangeAsync(result.Code!, session.CodeVerifier, cts.Token);
-        if (!exchangeResult.IsSuccess || exchangeResult.Success is null)
+        AuthApiExchangeResult exchangeResult;
+        GitHubUserResult userResult;
+        try
         {
-            SetStatus(DescribeExchangeFailure(exchangeResult.FailureKind));
+            exchangeResult = await authApiClient.ExchangeAsync(result.Code!, session.CodeVerifier, cts.Token);
+            if (!exchangeResult.IsSuccess || exchangeResult.Success is null)
+            {
+                SetStatus(DescribeExchangeFailure(exchangeResult.FailureKind));
+                EndSignInAttempt();
+                return;
+            }
+
+            userResult = await gitHubApiClient.GetCurrentUserAsync(exchangeResult.Success.AccessToken, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // ExchangeAsync/GetCurrentUserAsync deliberately rethrow rather
+            // than swallow an OperationCanceledException attributable to
+            // this call's own request-timeout token (see their doc
+            // comments) — a genuinely slow/degraded connection, not an
+            // instant refusal, must still never escape this async void
+            // handler uncaught (RP-014).
+            SetStatus("İstek zaman aşımına uğradı, lütfen tekrar deneyin.");
             EndSignInAttempt();
             return;
         }
@@ -154,7 +173,6 @@ public partial class LoginPage : ContentPage
         var accessToken = exchangeResult.Success.AccessToken;
         var refreshToken = exchangeResult.Success.RefreshToken;
 
-        var userResult = await gitHubApiClient.GetCurrentUserAsync(accessToken, cts.Token);
         if (!userResult.IsSuccess || userResult.User is null)
         {
             SetStatus($"Giriş başarısız: {userResult.SafeErrorMessage}");

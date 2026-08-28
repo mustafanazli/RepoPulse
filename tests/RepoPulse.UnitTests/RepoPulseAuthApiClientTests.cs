@@ -159,6 +159,28 @@ public class RepoPulseAuthApiClientTests
         Assert.Equal(AuthApiExchangeFailureKind.Timeout, result.FailureKind);
     }
 
+    // RP-014: pins the contract LoginPage.HandleSuccessfulCallbackAsync relies on —
+    // when the OperationCanceledException is attributable to the caller's OWN
+    // cancellation token (as opposed to an internal HttpClient timeout unrelated to
+    // that token, covered by the _Timeout_ test above), ExchangeAsync deliberately
+    // RETHROWS instead of swallowing it into a typed Timeout failure. LoginPage's
+    // OAuth callback handler uses its own request-timeout CancellationTokenSource
+    // and must catch this itself — RP-014 found and fixed exactly that gap: a
+    // genuinely slow/degraded connection (not an instant refusal) during token
+    // exchange could crash the app via an unhandled exception in an `async void`
+    // event handler.
+    [Fact]
+    public async Task ExchangeAsync_CallersOwnTokenCancelled_RethrowsRatherThanSwallowing()
+    {
+        var handler = new ThrowingHttpMessageHandler(new OperationCanceledException("simulated own-token timeout"));
+        var client = new RepoPulseAuthApiClient(new HttpClient(handler) { BaseAddress = new Uri("https://localhost:7082") });
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.ExchangeAsync("code", "verifier", cts.Token));
+    }
+
     [Fact]
     public async Task ExchangeAsync_NetworkFailure_ReturnsNetworkErrorSafely()
     {
