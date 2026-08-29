@@ -27,14 +27,19 @@ public static class OAuthCallbackParser
 
         if (!string.IsNullOrEmpty(error))
         {
+            // GitHub's own cancellation/error redirect echoes back whatever
+            // state we sent (RFC 6749 4.1.2.1) when the authorization request
+            // included one — which ours always does — so it is preserved
+            // here rather than discarded, letting the caller validate it
+            // against the pending session before treating it as authoritative.
             return string.Equals(error, "access_denied", StringComparison.OrdinalIgnoreCase)
-                ? OAuthCallbackResult.Cancelled(error, errorDescription)
-                : OAuthCallbackResult.Invalid(error, errorDescription);
+                ? OAuthCallbackResult.Cancelled(error, errorDescription, state)
+                : OAuthCallbackResult.Invalid(error, errorDescription, state);
         }
 
         if (string.IsNullOrEmpty(code) || string.IsNullOrEmpty(state))
         {
-            return OAuthCallbackResult.Invalid();
+            return OAuthCallbackResult.Invalid(state: state);
         }
 
         return OAuthCallbackResult.Success(code, state);

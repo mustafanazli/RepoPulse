@@ -216,14 +216,17 @@ public class OAuthCallbackAttemptGateTests
 
         var attemptId = coordinator.StartAttempt();
         // No sessionStore.TryStart call here — this models an Invalid
-        // callback the gate must never use as a trigger to fabricate a
-        // session that was never actually started.
+        // callback (no state at all) the gate must never use as a trigger to
+        // fabricate or touch a session that was never actually started.
         var invalidCallback = OAuthCallbackResult.Invalid();
 
         var decision = OAuthCallbackAttemptGate.Evaluate(
             invalidCallback, sessionStore, coordinator, attemptId, out var session);
 
-        Assert.Equal(OAuthCallbackDecision.AttemptEndedSafely, decision);
+        // A callback with no state to validate can never be attributed to
+        // any session — always Ignored, never treated as this attempt's own
+        // cancellation.
+        Assert.Equal(OAuthCallbackDecision.Ignored, decision);
         Assert.Null(session);
         Assert.False(sessionStore.TryConsume("anything", out _));
     }
@@ -257,5 +260,330 @@ public class OAuthCallbackAttemptGateTests
         var properties = typeof(OAuthCallbackResult).GetProperties();
         Assert.All(properties, property =>
             Assert.DoesNotContain("Attempt", property.Name, StringComparison.OrdinalIgnoreCase));
+    }
+}
+
+// RP-014 follow-up audit #2: the first gate fix correctly reordered the
+// Success outcome (validate state, then go terminal) but left Cancelled/
+// Invalid unconditionally ending whatever attempt the coordinator currently
+// considers active — with no state check at all, since OAuthCallbackParser
+// used to discard state for those outcomes. A stale Cancelled/Invalid signal
+// from an already-abandoned attempt A, arriving while a genuinely active
+// attempt B is in flight, could therefore wipe B's still-valid pending
+// session purely because "some attempt is currently active" — never
+// verifying that the signal actually belongs to B. These tests exercise the
+// corrected behavior: every outcome now requires AuthorizationSessionStore to
+// confirm the callback's state (when present) matches the current session
+// before it may end that attempt — exactly like Success — and none of them
+// inject an artificial callback attemptId (item #14): currentAttemptId is
+// always passed as the caller's own current context, mirroring LoginPage's
+// real field, never derived from the callback (see
+// ProductionCallbackPayload_CarriesNoAttemptId above, which proves
+// OAuthCallbackResult cannot carry one regardless of outcome).
+public class OAuthCallbackOutcomeValidationTests
+{
+    [Fact]
+    public void OldAccessDeniedForA_WhileBActive_DoesNotCancelOrResetB()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var sessionA));
+        coordinator.NotifyPaused();
+        Assert.True(coordinator.TryCancelForResumeWithoutCallback());
+        sessionStore.Reset();
+
+        var attemptIdB = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var sessionB));
+
+        // GitHub's own "user cancelled" redirect for A, echoing A's real
+        // state, arrives late while B is active.
+        var oldAccessDenied = OAuthCallbackResult.Cancelled("access_denied", "The user cancelled", sessionA.State);
+
+        var decision = OAuthCallbackAttemptGate.Evaluate(oldAccessDenied, sessionStore, coordinator, attemptIdB, out var session);
+
+        Assert.Equal(OAuthCallbackDecision.Ignored, decision);
+        Assert.Null(session);
+        Assert.True(coordinator.HasActiveAttempt);
+        // B's own session is still exactly the one issued for B.
+        Assert.True(sessionStore.TryConsume(sessionB.State, out var consumed));
+        Assert.NotNull(consumed);
+    }
+
+    [Fact]
+    public void OldOAuthErrorForA_WhileBActive_DoesNotCancelOrResetB()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var sessionA));
+        coordinator.NotifyPaused();
+        Assert.True(coordinator.TryCancelForResumeWithoutCallback());
+        sessionStore.Reset();
+
+        var attemptIdB = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var sessionB));
+
+        // A non-access_denied OAuth error (e.g. server_error) for A, echoing
+        // A's real state, arrives late while B is active.
+        var oldServerError = OAuthCallbackResult.Invalid("server_error", "Something went wrong", sessionA.State);
+
+        var decision = OAuthCallbackAttemptGate.Evaluate(oldServerError, sessionStore, coordinator, attemptIdB, out var session);
+
+        Assert.Equal(OAuthCallbackDecision.Ignored, decision);
+        Assert.Null(session);
+        Assert.True(coordinator.HasActiveAttempt);
+        Assert.True(sessionStore.TryConsume(sessionB.State, out _));
+    }
+
+    [Fact]
+    public void MissingStateCallback_WhileBActive_DoesNotConsumeB()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        var attemptIdB = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var sessionB));
+
+        // Models "code present, state missing" — OAuthCallbackParser itself
+        // classifies this as Invalid with no state to validate.
+        var missingState = OAuthCallbackResult.Invalid();
+
+        var decision = OAuthCallbackAttemptGate.Evaluate(missingState, sessionStore, coordinator, attemptIdB, out var session);
+
+        Assert.Equal(OAuthCallbackDecision.Ignored, decision);
+        Assert.Null(session);
+        Assert.True(coordinator.HasActiveAttempt);
+        Assert.True(sessionStore.TryConsume(sessionB.State, out _));
+    }
+
+    [Fact]
+    public void MismatchedStateCallback_WhileBActive_DoesNotConsumeB()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        var attemptIdB = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var sessionB));
+
+        // An OAuth error carrying some state that is neither B's real state
+        // nor derived from any real prior attempt — an arbitrary/foreign
+        // value (e.g. a forged or corrupted deep link).
+        var mismatched = OAuthCallbackResult.Invalid("temporarily_unavailable", null, "completely-unrelated-state");
+
+        var decision = OAuthCallbackAttemptGate.Evaluate(mismatched, sessionStore, coordinator, attemptIdB, out var session);
+
+        Assert.Equal(OAuthCallbackDecision.Ignored, decision);
+        Assert.Null(session);
+        Assert.True(coordinator.HasActiveAttempt);
+        Assert.True(sessionStore.TryConsume(sessionB.State, out _));
+    }
+
+    [Fact]
+    public void MalformedCallback_WhileBActive_DoesNotConsumeB()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        var attemptIdB = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var sessionB));
+
+        // Totally malformed/unparseable callback (e.g. unrecognized scheme/
+        // host/path, or an undecodable query) — OAuthCallbackParser always
+        // classifies this as a bare Invalid() with no error and no state.
+        var malformed = OAuthCallbackResult.Invalid();
+
+        var decision = OAuthCallbackAttemptGate.Evaluate(malformed, sessionStore, coordinator, attemptIdB, out var session);
+
+        Assert.Equal(OAuthCallbackDecision.Ignored, decision);
+        Assert.Null(session);
+        Assert.True(coordinator.HasActiveAttempt);
+        Assert.True(sessionStore.TryConsume(sessionB.State, out _));
+    }
+
+    [Fact]
+    public void ValidAccessDeniedForB_CancelsBAndClearsItsSession()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        var attemptIdB = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var sessionB));
+
+        var validCancel = OAuthCallbackResult.Cancelled("access_denied", "The user cancelled", sessionB.State);
+
+        var decision = OAuthCallbackAttemptGate.Evaluate(validCancel, sessionStore, coordinator, attemptIdB, out var session);
+
+        Assert.Equal(OAuthCallbackDecision.AttemptEndedSafely, decision);
+        Assert.Null(session);
+        Assert.False(coordinator.HasActiveAttempt);
+        // Session was genuinely cleared — a fresh attempt can start immediately.
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out _));
+    }
+
+    [Fact]
+    public void ValidOAuthErrorForB_TerminatesExactlyOnce()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        var attemptIdB = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var sessionB));
+
+        var validError = OAuthCallbackResult.Invalid("temporarily_unavailable", null, sessionB.State);
+
+        var firstDecision = OAuthCallbackAttemptGate.Evaluate(validError, sessionStore, coordinator, attemptIdB, out _);
+        Assert.Equal(OAuthCallbackDecision.AttemptEndedSafely, firstDecision);
+
+        // A duplicate delivery of the exact same error callback must never
+        // terminate anything a second time.
+        var secondDecision = OAuthCallbackAttemptGate.Evaluate(validError, sessionStore, coordinator, attemptIdB, out _);
+        Assert.Equal(OAuthCallbackDecision.Ignored, secondDecision);
+    }
+
+    [Fact]
+    public void OldInvalidCallbackThenValidBCallback_BStillSucceedsExactlyOnce()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        var attemptIdB = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var sessionB));
+
+        // A stale/foreign invalid signal (no state, or a state that doesn't
+        // match B) arrives first.
+        var staleInvalid = OAuthCallbackResult.Invalid("server_error", null, "some-other-attempts-state");
+        var staleDecision = OAuthCallbackAttemptGate.Evaluate(staleInvalid, sessionStore, coordinator, attemptIdB, out _);
+        Assert.Equal(OAuthCallbackDecision.Ignored, staleDecision);
+
+        // B's genuine callback must still succeed afterwards, exactly once.
+        var validCallback = OAuthCallbackResult.Success("real-code", sessionB.State);
+        var decision = OAuthCallbackAttemptGate.Evaluate(validCallback, sessionStore, coordinator, attemptIdB, out var session);
+        Assert.Equal(OAuthCallbackDecision.ProceedWithExchange, decision);
+        Assert.NotNull(session);
+    }
+
+    [Fact]
+    public async Task ConcurrentValidCancellationAndResume_ExactlyOneTerminalOutcome()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        var attemptId = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var session));
+        coordinator.NotifyPaused();
+
+        var validCancel = OAuthCallbackResult.Cancelled("access_denied", null, session.State);
+
+        var cancelTask = Task.Run(() =>
+        {
+            var decision = OAuthCallbackAttemptGate.Evaluate(validCancel, sessionStore, coordinator, attemptId, out _);
+            return decision == OAuthCallbackDecision.AttemptEndedSafely;
+        });
+        var resumeTask = Task.Run(() => coordinator.TryCancelForResumeWithoutCallback());
+
+        var results = await Task.WhenAll(cancelTask, resumeTask);
+
+        Assert.Single(results, outcome => outcome);
+    }
+
+    [Fact]
+    public async Task ConcurrentValidSuccessAndCancellation_ExactlyOneExchangeOrCancellation()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        var attemptId = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var session));
+
+        var validSuccess = OAuthCallbackResult.Success("real-code", session.State);
+        var validCancel = OAuthCallbackResult.Cancelled("access_denied", null, session.State);
+
+        var successTask = Task.Run(() =>
+            OAuthCallbackAttemptGate.Evaluate(validSuccess, sessionStore, coordinator, attemptId, out _));
+        var cancelTask = Task.Run(() =>
+            OAuthCallbackAttemptGate.Evaluate(validCancel, sessionStore, coordinator, attemptId, out _));
+
+        var decisions = await Task.WhenAll(successTask, cancelTask);
+
+        // AuthorizationSessionStore's own single-use consumption guarantees
+        // exactly one of these two genuinely racing, same-state callbacks
+        // can ever be treated as authoritative — the other must be Ignored.
+        Assert.Single(decisions, d => d is OAuthCallbackDecision.ProceedWithExchange or OAuthCallbackDecision.AttemptEndedSafely);
+        Assert.Single(decisions, d => d == OAuthCallbackDecision.Ignored);
+    }
+
+    [Fact]
+    public void InvalidCallbackNeverStartsExchange()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        var attemptId = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var session));
+
+        OAuthCallbackResult[] invalidVariants =
+        [
+            OAuthCallbackResult.Invalid(),
+            OAuthCallbackResult.Invalid("server_error", "oops"),
+            OAuthCallbackResult.Invalid("server_error", "oops", "wrong-state"),
+            OAuthCallbackResult.Cancelled("access_denied", null),
+            OAuthCallbackResult.Cancelled("access_denied", null, "wrong-state"),
+        ];
+
+        foreach (var invalid in invalidVariants)
+        {
+            var decision = OAuthCallbackAttemptGate.Evaluate(invalid, sessionStore, coordinator, attemptId, out var validated);
+            Assert.NotEqual(OAuthCallbackDecision.ProceedWithExchange, decision);
+            Assert.Null(validated);
+        }
+
+        // The genuinely pending session for this attempt was never touched
+        // by any of the above.
+        Assert.True(sessionStore.TryConsume(session.State, out _));
+    }
+
+    [Fact]
+    public void InvalidCallbackNeverClearsAnotherAttemptSession()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        var attemptIdB = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out var sessionB));
+
+        var invalidForSomeoneElse = OAuthCallbackResult.Invalid("access_denied_variant", null, "not-b-state");
+        OAuthCallbackAttemptGate.Evaluate(invalidForSomeoneElse, sessionStore, coordinator, attemptIdB, out _);
+
+        // B's session must still be fully usable afterwards.
+        Assert.True(sessionStore.TryConsume(sessionB.State, out var consumed));
+        Assert.NotNull(consumed);
+    }
+
+    [Fact]
+    public void RawErrorAndStateNeverReachDecisionOrSession()
+    {
+        var coordinator = new OAuthLoginAttemptCoordinator();
+        var sessionStore = new AuthorizationSessionStore();
+
+        var attemptId = coordinator.StartAttempt();
+        Assert.True(sessionStore.TryStart(TimeSpan.FromMinutes(5), out _));
+
+        const string secretMarker = "SECRET-ERROR-DESCRIPTION-MARKER-DO-NOT-LEAK";
+        const string stateMarker = "SECRET-STATE-MARKER-DO-NOT-LEAK";
+        var callback = OAuthCallbackResult.Invalid("server_error", secretMarker, stateMarker);
+
+        var decision = OAuthCallbackAttemptGate.Evaluate(callback, sessionStore, coordinator, attemptId, out var session);
+
+        // The gate's entire return surface is a 3-value enum plus an
+        // AuthorizationSession (State/CodeVerifier/CodeChallenge/
+        // ExpiresAtUtc only, see AuthorizationSession.cs) — neither can carry
+        // arbitrary error/error_description/state text through to a caller,
+        // log, or UI.
+        Assert.Null(session);
+        Assert.DoesNotContain(secretMarker, decision.ToString());
+        Assert.DoesNotContain(stateMarker, decision.ToString());
     }
 }

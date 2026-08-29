@@ -28,6 +28,32 @@ public class OAuthCallbackParserTests
     }
 
     [Fact]
+    public void Parse_AccessDeniedErrorWithState_PreservesStateForSessionValidation()
+    {
+        // GitHub echoes back whatever state we sent even on a cancellation
+        // redirect (RFC 6749 4.1.2.1) — OAuthCallbackAttemptGate needs this
+        // to tell apart a genuine current-attempt cancellation from a stale
+        // one belonging to an already-abandoned earlier attempt.
+        var uri = new Uri("repopulse://oauth/callback?error=access_denied&state=xyz789");
+
+        var result = OAuthCallbackParser.Parse(uri);
+
+        Assert.Equal(OAuthCallbackOutcome.Cancelled, result.Outcome);
+        Assert.Equal("xyz789", result.State);
+    }
+
+    [Fact]
+    public void Parse_OtherOAuthErrorWithState_ReturnsInvalidAndPreservesState()
+    {
+        var uri = new Uri("repopulse://oauth/callback?error=server_error&error_description=oops&state=xyz789");
+
+        var result = OAuthCallbackParser.Parse(uri);
+
+        Assert.Equal(OAuthCallbackOutcome.Invalid, result.Outcome);
+        Assert.Equal("xyz789", result.State);
+    }
+
+    [Fact]
     public void Parse_PercentEncodedValues_DecodeCorrectly()
     {
         // "abc def" and "xyz/789" percent-encoded.

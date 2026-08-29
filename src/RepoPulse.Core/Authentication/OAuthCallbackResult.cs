@@ -20,9 +20,14 @@ public sealed class OAuthCallbackResult
     public static OAuthCallbackResult Success(string code, string state) =>
         new(OAuthCallbackOutcome.Success, code, state, error: null, errorDescription: null);
 
-    public static OAuthCallbackResult Cancelled(string? error, string? errorDescription) =>
-        new(OAuthCallbackOutcome.Cancelled, code: null, state: null, error, errorDescription);
+    // `state` is optional here (unlike Success, where GitHub's redirect always
+    // carries the one we sent) because a cancellation/error redirect can only
+    // be validated against the pending session when GitHub actually echoed it
+    // back — see OAuthCallbackAttemptGate for how a present-but-unvalidated
+    // state is handled.
+    public static OAuthCallbackResult Cancelled(string? error, string? errorDescription, string? state = null) =>
+        new(OAuthCallbackOutcome.Cancelled, code: null, state, error, errorDescription);
 
-    public static OAuthCallbackResult Invalid(string? error = null, string? errorDescription = null) =>
-        new(OAuthCallbackOutcome.Invalid, code: null, state: null, error, errorDescription);
+    public static OAuthCallbackResult Invalid(string? error = null, string? errorDescription = null, string? state = null) =>
+        new(OAuthCallbackOutcome.Invalid, code: null, state, error, errorDescription);
 }
