@@ -25,6 +25,11 @@ public partial class LoginPage : ContentPage
     private bool isSubscribedToOAuthCallbacks;
     private bool isSignInInProgress;
 
+    // RP-014: identifies the current attempt to OAuthLoginAttemptCoordinator
+    // — never a token/code/state/verifier, just a monotonic id. 0 means no
+    // attempt has been started yet on this page instance.
+    private long currentAttemptId;
+
     public LoginPage(
         IRepoPulseAuthApiClient authApiClient,
         IGitHubApiClient gitHubApiClient,
@@ -45,6 +50,7 @@ public partial class LoginPage : ContentPage
         if (!isSubscribedToOAuthCallbacks)
         {
             OAuthCallbackBroker.CallbackReceived += OnOAuthCallbackReceived;
+            OAuthCallbackBroker.AttemptAbandoned += OnAttemptAbandoned;
             isSubscribedToOAuthCallbacks = true;
         }
 
@@ -62,6 +68,7 @@ public partial class LoginPage : ContentPage
         if (isSubscribedToOAuthCallbacks)
         {
             OAuthCallbackBroker.CallbackReceived -= OnOAuthCallbackReceived;
+            OAuthCallbackBroker.AttemptAbandoned -= OnAttemptAbandoned;
             isSubscribedToOAuthCallbacks = false;
         }
     }
@@ -85,6 +92,11 @@ public partial class LoginPage : ContentPage
         SignInButton.IsEnabled = false;
         SetStatus("GitHub'a yönlendiriliyor...");
 
+        // RP-014: recorded right before the system browser takes over, so
+        // MainActivity.OnResume can tell "the browser came back with no
+        // callback" apart from every other reason it might resume.
+        currentAttemptId = OAuthCallbackBroker.AttemptCoordinator.StartAttempt();
+
         var authorizationUrl = GitHubAuthorizationUrlBuilder.Build(
             OAuthConstants.GitHubClientId,
             OAuthConstants.RedirectUri,
@@ -107,6 +119,17 @@ public partial class LoginPage : ContentPage
     // token values — only short, safe, user-facing status text.
     private async void OnOAuthCallbackReceived(object? sender, OAuthCallbackResult result)
     {
+        // RP-014: a genuine callback (of any classification) always wins
+        // over a same-or-later "resumed without callback" signal — see
+        // OAuthLoginAttemptCoordinator's doc comment. The return value is
+        // intentionally not checked here: this callback still reached us
+        // through the live CallbackReceived subscription (the pre-existing,
+        // unchanged delivery path below), so it is processed exactly as
+        // before regardless — this call only prevents MainActivity.OnResume
+        // (which always runs right after on Android's activity-resume
+        // order) from spuriously treating this same attempt as abandoned.
+        OAuthCallbackBroker.AttemptCoordinator.TryConsumeCallback(currentAttemptId);
+
         switch (result.Outcome)
         {
             case OAuthCallbackOutcome.Success:
@@ -126,6 +149,19 @@ public partial class LoginPage : ContentPage
                 EndSignInAttempt();
                 break;
         }
+    }
+
+    // RP-014: fires when MainActivity.OnResume observes that the current
+    // attempt was abandoned — the system browser took over the foreground
+    // at least once and we are back with no callback ever having arrived
+    // (offline device, or the user backed out). Resets the page to a fully
+    // usable state without requiring an app restart, and clears the
+    // now-meaningless pending PKCE session so an immediate retry succeeds.
+    private void OnAttemptAbandoned()
+    {
+        sessionStore.Reset();
+        EndSignInAttempt();
+        MainThread.BeginInvokeOnMainThread(() => StatusLabel.IsVisible = false);
     }
 
     private async Task HandleSuccessfulCallbackAsync(OAuthCallbackResult result)
