@@ -101,6 +101,22 @@ public class GitHubApiClientTests
         Assert.DoesNotContain("test-access-token", result.SafeErrorMessage);
     }
 
+    // RP-014: pins the same contract as GetRepositoryAsync_CallersOwnTokenCancelled_
+    // RethrowsRatherThanSwallowing below — LoginPage's OAuth callback handler calls
+    // this with its own request-timeout CancellationTokenSource and must catch
+    // OperationCanceledException itself; RP-014 found and fixed exactly that gap.
+    [Fact]
+    public async Task GetCurrentUserAsync_CallersOwnTokenCancelled_RethrowsRatherThanSwallowing()
+    {
+        var handler = new ThrowingHttpMessageHandler(new OperationCanceledException("simulated own-token timeout"));
+        var client = new GitHubApiClient(new HttpClient(handler));
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.GetCurrentUserAsync("test-access-token", cts.Token));
+    }
+
     // --- GetRepositoryAsync (RP-006) ---
     // No test here ever contacts the real GitHub network — every call goes
     // through FakeHttpMessageHandler/ThrowingHttpMessageHandler.
@@ -388,6 +404,28 @@ public class GitHubApiClientTests
 
         Assert.False(result.IsSuccess);
         Assert.Equal(GitHubRepositoryFailureKind.NetworkError, result.FailureKind);
+    }
+
+    // RP-014: pins the contract callers rely on — when the OperationCanceledException
+    // is attributable to the caller's OWN cancellation token (as opposed to an
+    // internal HttpClient timeout unrelated to that token, covered by the
+    // _Timeout_ test above), GetRepositoryAsync deliberately RETHROWS instead of
+    // swallowing it into a typed NetworkError. A caller with its own
+    // request-timeout CancellationTokenSource (e.g. RepositoryListPage's manual
+    // owner/repo lookup) MUST catch this itself — RP-014 found and fixed exactly
+    // one call site (RepositoryListPage.OnLookupRepositoryClicked) that forgot to,
+    // letting a genuinely slow/degraded connection (not an instant refusal) crash
+    // the app via an unhandled exception in an `async void` event handler.
+    [Fact]
+    public async Task GetRepositoryAsync_CallersOwnTokenCancelled_RethrowsRatherThanSwallowing()
+    {
+        var handler = new ThrowingHttpMessageHandler(new OperationCanceledException("simulated own-token timeout"));
+        var client = new GitHubApiClient(new HttpClient(handler));
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.GetRepositoryAsync("test-access-token", "mustafanazli", "RepoPulse", cts.Token));
     }
 
     // --- GetUserRepositoriesAsync (RP-009) ---

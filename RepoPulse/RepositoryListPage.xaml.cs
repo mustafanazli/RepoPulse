@@ -467,37 +467,58 @@ public partial class RepositoryListPage : ContentPage
         LookupButton.IsEnabled = false;
         SetRepositoryLoading();
 
-        using var cts = new CancellationTokenSource(RequestTimeout);
-        var repositoryResult = await gitHubApiClient.GetRepositoryAsync(
-            accessToken,
-            parseResult.Value.Owner,
-            parseResult.Value.Name,
-            cts.Token);
-
-        isRepositoryLookupInProgress = false;
-        LookupButton.IsEnabled = true;
-
-        if (!repositoryResult.IsSuccess || repositoryResult.Repository is null)
+        try
         {
-            if (repositoryResult.FailureKind == GitHubRepositoryFailureKind.Unauthorized)
+            GitHubRepositoryResult repositoryResult;
+            using (var cts = new CancellationTokenSource(RequestTimeout))
             {
-                // A previously-valid (possibly restored, RP-008) token was
-                // just rejected by GitHub itself — the session is no
-                // longer valid regardless of what SecureStorage still
-                // holds. Always route to Login here, even if clearing the
-                // persisted copy fails: keeping the user "signed in" to a
-                // token GitHub has already rejected is worse than a
-                // possible stale value left on disk (which the next
-                // restore attempt will simply try to clear again).
-                await HandleInvalidSessionAsync();
+                try
+                {
+                    repositoryResult = await gitHubApiClient.GetRepositoryAsync(
+                        accessToken,
+                        parseResult.Value.Owner,
+                        parseResult.Value.Name,
+                        cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    // GetRepositoryAsync deliberately rethrows rather than
+                    // swallows an OperationCanceledException attributable to
+                    // this call's own request-timeout token (see its doc
+                    // comment) — a genuinely slow/degraded connection, not
+                    // an instant refusal, must still never escape this
+                    // async void handler uncaught (RP-014).
+                    repositoryResult = GitHubRepositoryResult.Failure(GitHubRepositoryFailureKind.NetworkError);
+                }
+            }
+
+            if (!repositoryResult.IsSuccess || repositoryResult.Repository is null)
+            {
+                if (repositoryResult.FailureKind == GitHubRepositoryFailureKind.Unauthorized)
+                {
+                    // A previously-valid (possibly restored, RP-008) token was
+                    // just rejected by GitHub itself — the session is no
+                    // longer valid regardless of what SecureStorage still
+                    // holds. Always route to Login here, even if clearing the
+                    // persisted copy fails: keeping the user "signed in" to a
+                    // token GitHub has already rejected is worse than a
+                    // possible stale value left on disk (which the next
+                    // restore attempt will simply try to clear again).
+                    await HandleInvalidSessionAsync();
+                    return;
+                }
+
+                SetRepositoryError(DescribeRepositoryFailure(repositoryResult.FailureKind));
                 return;
             }
 
-            SetRepositoryError(DescribeRepositoryFailure(repositoryResult.FailureKind));
-            return;
+            SetRepositoryResult(repositoryResult.Repository);
         }
-
-        SetRepositoryResult(repositoryResult.Repository);
+        finally
+        {
+            isRepositoryLookupInProgress = false;
+            LookupButton.IsEnabled = true;
+        }
     }
 
     private async Task HandleInvalidSessionAsync()

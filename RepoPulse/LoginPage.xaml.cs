@@ -25,6 +25,11 @@ public partial class LoginPage : ContentPage
     private bool isSubscribedToOAuthCallbacks;
     private bool isSignInInProgress;
 
+    // RP-014: identifies the current attempt to OAuthLoginAttemptCoordinator
+    // — never a token/code/state/verifier, just a monotonic id. 0 means no
+    // attempt has been started yet on this page instance.
+    private long currentAttemptId;
+
     public LoginPage(
         IRepoPulseAuthApiClient authApiClient,
         IGitHubApiClient gitHubApiClient,
@@ -45,6 +50,7 @@ public partial class LoginPage : ContentPage
         if (!isSubscribedToOAuthCallbacks)
         {
             OAuthCallbackBroker.CallbackReceived += OnOAuthCallbackReceived;
+            OAuthCallbackBroker.AttemptAbandoned += OnAttemptAbandoned;
             isSubscribedToOAuthCallbacks = true;
         }
 
@@ -62,6 +68,7 @@ public partial class LoginPage : ContentPage
         if (isSubscribedToOAuthCallbacks)
         {
             OAuthCallbackBroker.CallbackReceived -= OnOAuthCallbackReceived;
+            OAuthCallbackBroker.AttemptAbandoned -= OnAttemptAbandoned;
             isSubscribedToOAuthCallbacks = false;
         }
     }
@@ -85,6 +92,11 @@ public partial class LoginPage : ContentPage
         SignInButton.IsEnabled = false;
         SetStatus("GitHub'a yönlendiriliyor...");
 
+        // RP-014: recorded right before the system browser takes over, so
+        // MainActivity.OnResume can tell "the browser came back with no
+        // callback" apart from every other reason it might resume.
+        currentAttemptId = OAuthCallbackBroker.AttemptCoordinator.StartAttempt();
+
         var authorizationUrl = GitHubAuthorizationUrlBuilder.Build(
             OAuthConstants.GitHubClientId,
             OAuthConstants.RedirectUri,
@@ -105,48 +117,92 @@ public partial class LoginPage : ContentPage
 
     // Deliberately never displays the actual code/state/error_description/
     // token values — only short, safe, user-facing status text.
+    //
+    // RP-014 follow-up audit: the callback itself never carries an attempt id
+    // (GitHub's redirect only contains code/state/error) — currentAttemptId
+    // below is always THIS page instance's own field, which a stale callback
+    // from an already-abandoned earlier attempt cannot distinguish itself
+    // from. OAuthCallbackAttemptGate is what makes this safe: it consults
+    // AuthorizationSessionStore FIRST, so the coordinator is only ever told
+    // "the callback won" once the callback's own state is proven to match the
+    // session we are currently actually waiting on. See its doc comment.
     private async void OnOAuthCallbackReceived(object? sender, OAuthCallbackResult result)
     {
-        switch (result.Outcome)
+        var decision = OAuthCallbackAttemptGate.Evaluate(
+            result,
+            sessionStore,
+            OAuthCallbackBroker.AttemptCoordinator,
+            currentAttemptId,
+            out var validatedSession);
+
+        switch (decision)
         {
-            case OAuthCallbackOutcome.Success:
-                await HandleSuccessfulCallbackAsync(result);
+            case OAuthCallbackDecision.ProceedWithExchange:
+                await HandleSuccessfulCallbackAsync(result.Code!, validatedSession!);
                 break;
 
-            case OAuthCallbackOutcome.Cancelled:
-                sessionStore.Reset();
-                SetStatus("Giriş iptal edildi.");
+            case OAuthCallbackDecision.AttemptEndedSafely:
+                SetStatus(result.Outcome == OAuthCallbackOutcome.Cancelled
+                    ? "Giriş iptal edildi."
+                    : "Giriş isteği doğrulanamadı, lütfen tekrar deneyin.");
                 EndSignInAttempt();
                 break;
 
-            case OAuthCallbackOutcome.Invalid:
+            case OAuthCallbackDecision.Ignored:
             default:
-                sessionStore.Reset();
-                SetStatus("Giriş isteği doğrulanamadı, lütfen tekrar deneyin.");
-                EndSignInAttempt();
+                // Did not belong to the currently active attempt (wrong/
+                // expired state, or that attempt already concluded by other
+                // means) — silently no-op so whichever attempt is genuinely
+                // active, if any, continues completely undisturbed.
                 break;
         }
     }
 
-    private async Task HandleSuccessfulCallbackAsync(OAuthCallbackResult result)
+    // RP-014: fires when MainActivity.OnResume observes that the current
+    // attempt was abandoned — the system browser took over the foreground
+    // at least once and we are back with no callback ever having arrived
+    // (offline device, or the user backed out). Resets the page to a fully
+    // usable state without requiring an app restart, and clears the
+    // now-meaningless pending PKCE session so an immediate retry succeeds.
+    private void OnAttemptAbandoned()
     {
-        if (!sessionStore.TryConsume(result.State, out var session) || session is null)
-        {
-            // Wrong/missing/expired/already-used state: never send the token
-            // request for a callback we cannot attribute to our own session.
-            SetStatus("Giriş isteği doğrulanamadı, lütfen tekrar deneyin.");
-            EndSignInAttempt();
-            return;
-        }
+        sessionStore.Reset();
+        EndSignInAttempt();
+        MainThread.BeginInvokeOnMainThread(() => StatusLabel.IsVisible = false);
+    }
 
+    // `session` has already been validated by OAuthCallbackAttemptGate (via
+    // AuthorizationSessionStore.TryConsume) before this is ever called — never
+    // re-validated or re-consumed here.
+    private async Task HandleSuccessfulCallbackAsync(string code, AuthorizationSession session)
+    {
         SetStatus("Doğrulanıyor...");
 
         using var cts = new CancellationTokenSource(RequestTimeout);
 
-        var exchangeResult = await authApiClient.ExchangeAsync(result.Code!, session.CodeVerifier, cts.Token);
-        if (!exchangeResult.IsSuccess || exchangeResult.Success is null)
+        AuthApiExchangeResult exchangeResult;
+        GitHubUserResult userResult;
+        try
         {
-            SetStatus(DescribeExchangeFailure(exchangeResult.FailureKind));
+            exchangeResult = await authApiClient.ExchangeAsync(code, session.CodeVerifier, cts.Token);
+            if (!exchangeResult.IsSuccess || exchangeResult.Success is null)
+            {
+                SetStatus(DescribeExchangeFailure(exchangeResult.FailureKind));
+                EndSignInAttempt();
+                return;
+            }
+
+            userResult = await gitHubApiClient.GetCurrentUserAsync(exchangeResult.Success.AccessToken, cts.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            // ExchangeAsync/GetCurrentUserAsync deliberately rethrow rather
+            // than swallow an OperationCanceledException attributable to
+            // this call's own request-timeout token (see their doc
+            // comments) — a genuinely slow/degraded connection, not an
+            // instant refusal, must still never escape this async void
+            // handler uncaught (RP-014).
+            SetStatus("İstek zaman aşımına uğradı, lütfen tekrar deneyin.");
             EndSignInAttempt();
             return;
         }
@@ -154,7 +210,6 @@ public partial class LoginPage : ContentPage
         var accessToken = exchangeResult.Success.AccessToken;
         var refreshToken = exchangeResult.Success.RefreshToken;
 
-        var userResult = await gitHubApiClient.GetCurrentUserAsync(accessToken, cts.Token);
         if (!userResult.IsSuccess || userResult.User is null)
         {
             SetStatus($"Giriş başarısız: {userResult.SafeErrorMessage}");

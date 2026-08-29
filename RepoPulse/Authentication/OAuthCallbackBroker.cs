@@ -19,6 +19,22 @@ public static class OAuthCallbackBroker
 
     public static event EventHandler<OAuthCallbackResult>? CallbackReceived;
 
+    // RP-014: MAUI-independent, unit-tested (RepoPulse.Core.Authentication)
+    // coordinator that resolves the race between MainActivity's raw Android
+    // Activity lifecycle and LoginPage's OAuth flow — see its own doc
+    // comment. A single shared instance, exactly like this broker itself,
+    // since MainActivity (a static context) and LoginPage both need to
+    // reach the same attempt state.
+    public static readonly OAuthLoginAttemptCoordinator AttemptCoordinator = new();
+
+    // Raised when MainActivity.OnResume observes that a sign-in attempt was
+    // abandoned (paused for the system browser, resumed with no callback
+    // ever received). Carries no data — a subscriber reacts by resetting
+    // its own UI state and any pending authorization session.
+    public static event Action? AttemptAbandoned;
+
+    public static void PublishAttemptAbandoned() => AttemptAbandoned?.Invoke();
+
     public static void Publish(OAuthCallbackResult result)
     {
         var handler = CallbackReceived;
