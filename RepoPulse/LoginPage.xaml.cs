@@ -117,36 +117,43 @@ public partial class LoginPage : ContentPage
 
     // Deliberately never displays the actual code/state/error_description/
     // token values — only short, safe, user-facing status text.
+    //
+    // RP-014 follow-up audit: the callback itself never carries an attempt id
+    // (GitHub's redirect only contains code/state/error) — currentAttemptId
+    // below is always THIS page instance's own field, which a stale callback
+    // from an already-abandoned earlier attempt cannot distinguish itself
+    // from. OAuthCallbackAttemptGate is what makes this safe: it consults
+    // AuthorizationSessionStore FIRST, so the coordinator is only ever told
+    // "the callback won" once the callback's own state is proven to match the
+    // session we are currently actually waiting on. See its doc comment.
     private async void OnOAuthCallbackReceived(object? sender, OAuthCallbackResult result)
     {
-        // RP-014: a genuine callback (of any classification) always wins
-        // over a same-or-later "resumed without callback" signal — see
-        // OAuthLoginAttemptCoordinator's doc comment. The return value is
-        // intentionally not checked here: this callback still reached us
-        // through the live CallbackReceived subscription (the pre-existing,
-        // unchanged delivery path below), so it is processed exactly as
-        // before regardless — this call only prevents MainActivity.OnResume
-        // (which always runs right after on Android's activity-resume
-        // order) from spuriously treating this same attempt as abandoned.
-        OAuthCallbackBroker.AttemptCoordinator.TryConsumeCallback(currentAttemptId);
+        var decision = OAuthCallbackAttemptGate.Evaluate(
+            result,
+            sessionStore,
+            OAuthCallbackBroker.AttemptCoordinator,
+            currentAttemptId,
+            out var validatedSession);
 
-        switch (result.Outcome)
+        switch (decision)
         {
-            case OAuthCallbackOutcome.Success:
-                await HandleSuccessfulCallbackAsync(result);
+            case OAuthCallbackDecision.ProceedWithExchange:
+                await HandleSuccessfulCallbackAsync(result.Code!, validatedSession!);
                 break;
 
-            case OAuthCallbackOutcome.Cancelled:
-                sessionStore.Reset();
-                SetStatus("Giriş iptal edildi.");
+            case OAuthCallbackDecision.AttemptEndedSafely:
+                SetStatus(result.Outcome == OAuthCallbackOutcome.Cancelled
+                    ? "Giriş iptal edildi."
+                    : "Giriş isteği doğrulanamadı, lütfen tekrar deneyin.");
                 EndSignInAttempt();
                 break;
 
-            case OAuthCallbackOutcome.Invalid:
+            case OAuthCallbackDecision.Ignored:
             default:
-                sessionStore.Reset();
-                SetStatus("Giriş isteği doğrulanamadı, lütfen tekrar deneyin.");
-                EndSignInAttempt();
+                // Did not belong to the currently active attempt (wrong/
+                // expired state, or that attempt already concluded by other
+                // means) — silently no-op so whichever attempt is genuinely
+                // active, if any, continues completely undisturbed.
                 break;
         }
     }
@@ -164,17 +171,11 @@ public partial class LoginPage : ContentPage
         MainThread.BeginInvokeOnMainThread(() => StatusLabel.IsVisible = false);
     }
 
-    private async Task HandleSuccessfulCallbackAsync(OAuthCallbackResult result)
+    // `session` has already been validated by OAuthCallbackAttemptGate (via
+    // AuthorizationSessionStore.TryConsume) before this is ever called — never
+    // re-validated or re-consumed here.
+    private async Task HandleSuccessfulCallbackAsync(string code, AuthorizationSession session)
     {
-        if (!sessionStore.TryConsume(result.State, out var session) || session is null)
-        {
-            // Wrong/missing/expired/already-used state: never send the token
-            // request for a callback we cannot attribute to our own session.
-            SetStatus("Giriş isteği doğrulanamadı, lütfen tekrar deneyin.");
-            EndSignInAttempt();
-            return;
-        }
-
         SetStatus("Doğrulanıyor...");
 
         using var cts = new CancellationTokenSource(RequestTimeout);
@@ -183,7 +184,7 @@ public partial class LoginPage : ContentPage
         GitHubUserResult userResult;
         try
         {
-            exchangeResult = await authApiClient.ExchangeAsync(result.Code!, session.CodeVerifier, cts.Token);
+            exchangeResult = await authApiClient.ExchangeAsync(code, session.CodeVerifier, cts.Token);
             if (!exchangeResult.IsSuccess || exchangeResult.Success is null)
             {
                 SetStatus(DescribeExchangeFailure(exchangeResult.FailureKind));
