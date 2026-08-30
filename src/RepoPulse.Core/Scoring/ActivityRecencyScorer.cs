@@ -47,7 +47,7 @@ public static class ActivityRecencyScorer
     {
         if (lastCommitUtc is null)
         {
-            return new ActivityRecencyScore(0, ActivityRecencyBand.NoCommits, AlgorithmVersion);
+            return ActivityRecencyScore.Create(0, ActivityRecencyBand.NoCommits, AlgorithmVersion);
         }
 
         // DateTimeOffset subtraction compares absolute instants regardless of
@@ -61,19 +61,19 @@ public static class ActivityRecencyScorer
 
         if (age <= FreshThreshold)
         {
-            return new ActivityRecencyScore(100, ActivityRecencyBand.Fresh, AlgorithmVersion);
+            return ActivityRecencyScore.Create(100, ActivityRecencyBand.Fresh, AlgorithmVersion);
         }
 
         if (age <= RecentThreshold)
         {
-            return new ActivityRecencyScore(75, ActivityRecencyBand.Recent, AlgorithmVersion);
+            return ActivityRecencyScore.Create(75, ActivityRecencyBand.Recent, AlgorithmVersion);
         }
 
         if (age <= AgingThreshold)
         {
-            return new ActivityRecencyScore(40, ActivityRecencyBand.Aging, AlgorithmVersion);
+            return ActivityRecencyScore.Create(40, ActivityRecencyBand.Aging, AlgorithmVersion);
         }
 
-        return new ActivityRecencyScore(10, ActivityRecencyBand.Stale, AlgorithmVersion);
+        return ActivityRecencyScore.Create(10, ActivityRecencyBand.Stale, AlgorithmVersion);
     }
 }
