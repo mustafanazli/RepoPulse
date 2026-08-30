@@ -2155,6 +2155,133 @@ public class GitHubApiClientTests
             () => client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, cts.Token));
     }
 
+    // --- Response-shape hardening (targeted post-PR #18 audit) ---
+    // A JSON array of length 1 only proves something is present — never that
+    // it is a commit. Every one of these bodies is syntactically valid JSON
+    // but must still be rejected as Unexpected before Success(1) or a Link
+    // header's rel="last" count is ever trusted.
+
+    private const string MinimalValidCommitListItemJson = """[{"sha":"test-sha","commit":{}}]""";
+
+    // 1-14. Every way the sole array element can fail the minimum
+    // commit-list-item shape check.
+    public static IEnumerable<object[]> InvalidCommitListItemShapes()
+    {
+        yield return new object[] { "[null]" };                                  // 1
+        yield return new object[] { """["x"]""" };                               // 2
+        yield return new object[] { "[42]" };                                    // 3
+        yield return new object[] { "[true]" };                                  // 4
+        yield return new object[] { "[[]]" };                                    // 5
+        yield return new object[] { "[{}]" };                                    // 6
+        yield return new object[] { """[{"sha":"abc"}]""" };                     // 7. missing commit
+        yield return new object[] { """[{"commit":{}}]""" };                     // 8. missing sha
+        yield return new object[] { """[{"sha":null,"commit":{}}]""" };          // 9
+        yield return new object[] { """[{"sha":"","commit":{}}]""" };            // 10
+        yield return new object[] { """[{"sha":"   ","commit":{}}]""" };         // 11
+        yield return new object[] { """[{"sha":42,"commit":{}}]""" };            // 12
+        yield return new object[] { """[{"sha":"abc","commit":null}]""" };       // 13
+        yield return new object[] { """[{"sha":"abc","commit":"x"}]""" };        // 14
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidCommitListItemShapes))]
+    public async Task GetDefaultBranchCommitCountAsync_InvalidItemShapeNoLink_ReturnsUnexpectedFailure(string body)
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+        Assert.Null(result.Count);
+        // 18. Exactly one request is ever sent, regardless of the malformed shape.
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    // 15. A genuinely minimal valid item with no Link header → 1.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_MinimalValidItemNoLink_ReturnsOne()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(MinimalValidCommitListItemJson, Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(1, result.Count);
+    }
+
+    // 16. A genuinely minimal valid item with a trusted rel="last" → that page count.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_MinimalValidItemWithTrustedLast_ReturnsThatCount()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(MinimalValidCommitListItemJson, Encoding.UTF8, "application/json"),
+            Headers = { { "Link", TrustedLastLinkHeader(7) } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(7, result.Count);
+    }
+
+    // 17. An invalid item shape alongside a trusted rel="last" must still be
+    // rejected — the Link header's count is never consulted (let alone
+    // trusted) once the item itself fails the shape check.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_InvalidItemShapeWithTrustedLast_ReturnsUnexpectedAndIgnoresLinkCount()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("[{}]", Encoding.UTF8, "application/json"),
+            Headers = { { "Link", TrustedLastLinkHeader(999) } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+        Assert.NotEqual(999, result.Count);
+        Assert.Null(result.Count);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    // 19. A raw sha/body marker never leaks into the result, and no exception is thrown.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_InvalidItemShape_DoesNotLeakRawShaOrBodyAndDoesNotThrow()
+    {
+        const string marker = "MARKER-RAW-SHA-OR-BODY-commitcount-9f3a";
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent($$"""[{"sha":"{{marker}}"}]""", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+        // GitHubCommitCountResult carries no free-text field at all — only
+        // Count (null here) and the FailureKind enum — so there is
+        // structurally nowhere for the raw sha or body to leak into.
+        Assert.Null(result.Count);
+    }
+
+    // 20. Regression: the full existing suite (552 tests prior to this
+    // hardening) is re-run as part of this same test assembly on every
+    // build — no dedicated test needed here beyond that shared run.
+
     // 43. GitHubCommitCountResult invariants — construction is restricted,
     // Count is never negative, and Count/FailureKind are mutually exclusive.
     [Fact]

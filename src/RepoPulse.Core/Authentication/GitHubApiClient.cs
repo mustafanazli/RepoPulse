@@ -728,8 +728,25 @@ public sealed class GitHubApiClient : IGitHubApiClient
                 return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unexpected);
             }
 
+            // A JSON array of length 1 only proves something is present — not
+            // that it is a commit. Before this element is trusted enough to
+            // report Success(1), or to let a Link header's rel="last" page
+            // number be read at all, it must have the minimum shape of a
+            // GitHub commit-list item: an object with a non-empty string
+            // "sha" and an object "commit". Nothing beyond that shape is
+            // read — no sha value, message, author/committer, or date is
+            // extracted, retained, or ever reaches the result/log/exception.
+            if (!HasMinimalCommitListItemShape(root[0]))
+            {
+                return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unexpected);
+            }
+
             if (string.IsNullOrEmpty(linkHeaderValue))
             {
+                // No Link header at all is GitHub's own signal that this is
+                // the only page — consistent with per_page=1 pagination
+                // semantics, a single validated item with no further pages
+                // means exactly one commit exists in the window.
                 return GitHubCommitCountResult.Success(1);
             }
 
@@ -747,6 +764,22 @@ public sealed class GitHubApiClient : IGitHubApiClient
                 : GitHubCommitCountResult.Success(page.Value);
         }
     }
+
+    // Minimum shape check for a single element of a /commits response array —
+    // deliberately shallow: this only needs to distinguish "a real commit
+    // record" from "not a commit at all" (null/string/number/bool/array/an
+    // empty or unrelated object), never to validate the commit's content.
+    // "sha" is checked only for being a non-empty/non-whitespace string —
+    // no length or hex-format requirement, since Git's object ID format is
+    // not this method's contract to enforce and could change. The sha value
+    // itself, and everything inside "commit", is never read any further.
+    private static bool HasMinimalCommitListItemShape(JsonElement element) =>
+        element.ValueKind == JsonValueKind.Object &&
+        element.TryGetProperty("sha", out var sha) &&
+        sha.ValueKind == JsonValueKind.String &&
+        !string.IsNullOrWhiteSpace(sha.GetString()) &&
+        element.TryGetProperty("commit", out var commit) &&
+        commit.ValueKind == JsonValueKind.Object;
 
     // Finds the rel="last" entry in an RFC 8288 Link header. Returns
     // Found=false both when no such entry exists AND when more than one
