@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http.Headers;
@@ -15,6 +16,20 @@ public interface IGitHubApiClient
     Task<GitHubRepositoryListResult> GetUserRepositoriesAsync(string accessToken, CancellationToken cancellationToken);
 
     Task<GitHubLatestCommitResult> GetLatestRepositoryCommitAsync(string accessToken, string owner, string repository, CancellationToken cancellationToken);
+
+    // RP-016: counts commits reachable from the repository's DEFAULT branch
+    // only — GitHub's /commits endpoint without an explicit sha/ref query
+    // parameter walks the default branch's history, never every branch's
+    // combined activity. sinceUtc/untilUtc are always supplied by the
+    // caller (no system clock read here); the window is a plain half-open
+    // range [sinceUtc, untilUtc) with no fixed 30/90-day assumption baked in.
+    Task<GitHubCommitCountResult> GetDefaultBranchCommitCountAsync(
+        string accessToken,
+        string owner,
+        string repository,
+        DateTimeOffset sinceUtc,
+        DateTimeOffset untilUtc,
+        CancellationToken cancellationToken);
 }
 
 // Single responsibility: GET /user. Does not know about OAuth, PKCE, or the
@@ -220,6 +235,99 @@ public sealed class GitHubApiClient : IGitHubApiClient
                 return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.RateLimited);
             default:
                 return GitHubLatestCommitResult.Failure(GitHubLatestCommitFailureKind.Unexpected);
+        }
+    }
+
+    // RP-016: GET /repos/{owner}/{repository}/commits?since=..&until=..&per_page=1
+    // — counts commits in a caller-supplied UTC window WITHOUT downloading
+    // every commit body. per_page=1 forces GitHub to paginate at one record
+    // per page; the total commit count is then read from the page number in
+    // the response's Link "rel=last" entry (RFC 8288), never by following
+    // that URL with a second request. Only the DEFAULT branch is counted —
+    // GitHub's own default for this endpoint when no sha/ref is given.
+    //
+    // sinceUtc/untilUtc are validated by the caller of this method (never
+    // read from the system clock here) and are always normalized to UTC and
+    // sent as an ISO 8601 round-trip ("o") timestamp — offset-independent,
+    // so two DateTimeOffset values representing the same instant with
+    // different offsets produce byte-identical query values.
+    public async Task<GitHubCommitCountResult> GetDefaultBranchCommitCountAsync(
+        string accessToken,
+        string owner,
+        string repository,
+        DateTimeOffset sinceUtc,
+        DateTimeOffset untilUtc,
+        CancellationToken cancellationToken)
+    {
+        if (sinceUtc >= untilUtc)
+        {
+            // Resolved before any network call — an invalid range is a
+            // caller-input problem, not something GitHub needs to reject.
+            return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.InvalidRange);
+        }
+
+        var sinceQueryValue = Uri.EscapeDataString(sinceUtc.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture));
+        var untilQueryValue = Uri.EscapeDataString(untilUtc.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture));
+        var requestUri =
+            $"{OAuthConstants.RepositoryEndpointBase}/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}/commits" +
+            $"?since={sinceQueryValue}&until={untilQueryValue}&per_page=1";
+
+        using var request = new HttpRequestMessage(HttpMethod.Get, requestUri);
+        ApplyStandardHeaders(request, accessToken);
+
+        string body;
+        HttpStatusCode statusCode;
+        string? linkHeaderValue;
+        try
+        {
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            statusCode = response.StatusCode;
+            body = await response.Content.ReadAsStringAsync(cancellationToken);
+            linkHeaderValue = response.Headers.TryGetValues("Link", out var linkValues)
+                ? linkValues.FirstOrDefault()
+                : null;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.NetworkError);
+        }
+        catch (HttpRequestException)
+        {
+            return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.NetworkError);
+        }
+        // See the matching comment in RepoPulseAuthApiClient.ExchangeAsync —
+        // Xamarin.Android's HTTP handler can surface a raw socket failure as
+        // System.Net.WebException instead of HttpRequestException.
+        catch (WebException)
+        {
+            return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.NetworkError);
+        }
+
+        // Status code alone decides the outcome — GitHub's own response body
+        // (which may carry an error message) is never surfaced to the
+        // caller/UI/logs for any non-success status. GitHub returns 409 for
+        // a genuinely empty repository's commits endpoint — treated as a
+        // real success (zero commits), not a failure, exactly like
+        // GetLatestRepositoryCommitAsync.
+        switch (statusCode)
+        {
+            case HttpStatusCode.OK:
+                return ParseCommitCount(body, linkHeaderValue, owner, repository, sinceUtc, untilUtc);
+            case (HttpStatusCode)409:
+                return GitHubCommitCountResult.Success(0);
+            case HttpStatusCode.NotFound:
+                return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.NotFound);
+            case HttpStatusCode.Unauthorized:
+                return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unauthorized);
+            case HttpStatusCode.Forbidden:
+            case (HttpStatusCode)429:
+                return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.RateLimited);
+            default:
+                return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unexpected);
         }
     }
 
@@ -567,6 +675,258 @@ public sealed class GitHubApiClient : IGitHubApiClient
         DateTimeOffset.TryParse(dateElement.GetString(), out var parsed)
             ? parsed
             : null;
+
+    // RP-016: interprets a single per_page=1 commits response. The only
+    // trustworthy source of the total count beyond "0" or "1" is a
+    // validated rel="last" entry in the Link header — its page number is
+    // the count, since each page holds exactly one commit. Any shape that
+    // cannot be safely interpreted (more than one record despite per_page=1,
+    // an empty array alongside a Link header, a missing/duplicate/untrusted
+    // rel="last") returns Unexpected rather than guessing.
+    private static GitHubCommitCountResult ParseCommitCount(
+        string body,
+        string? linkHeaderValue,
+        string owner,
+        string repository,
+        DateTimeOffset sinceUtc,
+        DateTimeOffset untilUtc)
+    {
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(body);
+        }
+        catch (JsonException)
+        {
+            return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unexpected);
+        }
+
+        using (document)
+        {
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Array)
+            {
+                return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unexpected);
+            }
+
+            var length = root.GetArrayLength();
+
+            if (length == 0)
+            {
+                // GitHub would never report more pages exist (a Link header)
+                // for a page that came back empty — that contradiction is
+                // treated as untrusted data, not "zero commits".
+                return string.IsNullOrEmpty(linkHeaderValue)
+                    ? GitHubCommitCountResult.Success(0)
+                    : GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unexpected);
+            }
+
+            if (length > 1)
+            {
+                // per_page=1 was requested; more than one record back is a
+                // contract violation, never silently truncated to the first.
+                return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unexpected);
+            }
+
+            // A JSON array of length 1 only proves something is present — not
+            // that it is a commit. Before this element is trusted enough to
+            // report Success(1), or to let a Link header's rel="last" page
+            // number be read at all, it must have the minimum shape of a
+            // GitHub commit-list item: an object with a non-empty string
+            // "sha" and an object "commit". Nothing beyond that shape is
+            // read — no sha value, message, author/committer, or date is
+            // extracted, retained, or ever reaches the result/log/exception.
+            if (!HasMinimalCommitListItemShape(root[0]))
+            {
+                return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unexpected);
+            }
+
+            if (string.IsNullOrEmpty(linkHeaderValue))
+            {
+                // No Link header at all is GitHub's own signal that this is
+                // the only page — consistent with per_page=1 pagination
+                // semantics, a single validated item with no further pages
+                // means exactly one commit exists in the window.
+                return GitHubCommitCountResult.Success(1);
+            }
+
+            var (found, lastUrl) = TryFindLastLinkUrl(linkHeaderValue);
+            if (!found)
+            {
+                // Either no rel="last" entry at all, or more than one
+                // (conflicting/duplicate) — never guessed either way.
+                return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unexpected);
+            }
+
+            var page = ValidateAndExtractLastPage(lastUrl!, owner, repository, sinceUtc, untilUtc);
+            return page is null
+                ? GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unexpected)
+                : GitHubCommitCountResult.Success(page.Value);
+        }
+    }
+
+    // Minimum shape check for a single element of a /commits response array —
+    // deliberately shallow: this only needs to distinguish "a real commit
+    // record" from "not a commit at all" (null/string/number/bool/array/an
+    // empty or unrelated object), never to validate the commit's content.
+    // "sha" is checked only for being a non-empty/non-whitespace string —
+    // no length or hex-format requirement, since Git's object ID format is
+    // not this method's contract to enforce and could change. The sha value
+    // itself, and everything inside "commit", is never read any further.
+    private static bool HasMinimalCommitListItemShape(JsonElement element) =>
+        element.ValueKind == JsonValueKind.Object &&
+        element.TryGetProperty("sha", out var sha) &&
+        sha.ValueKind == JsonValueKind.String &&
+        !string.IsNullOrWhiteSpace(sha.GetString()) &&
+        element.TryGetProperty("commit", out var commit) &&
+        commit.ValueKind == JsonValueKind.Object;
+
+    // Finds the rel="last" entry in an RFC 8288 Link header. Returns
+    // Found=false both when no such entry exists AND when more than one
+    // conflicting rel="last" entry is present — both cases mean "nothing
+    // trustworthy to read a count from", and the caller treats them
+    // identically (Unexpected), never guessing which duplicate to trust.
+    private static (bool Found, string? Url) TryFindLastLinkUrl(string linkHeaderValue)
+    {
+        string? lastUrl = null;
+        var matchCount = 0;
+
+        foreach (var rawSegment in linkHeaderValue.Split(','))
+        {
+            var segment = rawSegment.Trim();
+            var linkStart = segment.IndexOf('<');
+            var linkEnd = segment.IndexOf('>');
+            if (linkStart != 0 || linkEnd <= linkStart)
+            {
+                continue;
+            }
+
+            var attributes = segment[(linkEnd + 1)..];
+            if (!attributes.Contains("rel=\"last\"", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            matchCount++;
+            lastUrl = segment[(linkStart + 1)..linkEnd];
+        }
+
+        return matchCount == 1 ? (true, lastUrl) : (false, null);
+    }
+
+    // Validates a candidate rel="last" URL against a strict trust anchor
+    // before ever reading its "page" value as a count: exact scheme/host/
+    // default port/no userinfo/no fragment/exact path, and a query
+    // containing ONLY since/until/per_page/page — no duplicates, no empty
+    // key/value, no unknown parameter. since/until are compared as the SAME
+    // UTC INSTANT as the original request (DateTimeOffset equality is
+    // offset-independent), not as raw strings, so URL-encoding or
+    // offset-notation differences between the original request and this
+    // link are tolerated as long as they name the same point in time.
+    private static int? ValidateAndExtractLastPage(
+        string url,
+        string owner,
+        string repository,
+        DateTimeOffset expectedSinceUtc,
+        DateTimeOffset expectedUntilUtc)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+        {
+            return null;
+        }
+
+        if (uri.Scheme != Uri.UriSchemeHttps ||
+            !string.Equals(uri.Host, "api.github.com", StringComparison.OrdinalIgnoreCase) ||
+            !uri.IsDefaultPort ||
+            !string.IsNullOrEmpty(uri.UserInfo) ||
+            !string.IsNullOrEmpty(uri.Fragment))
+        {
+            return null;
+        }
+
+        var expectedPath = $"/repos/{Uri.EscapeDataString(owner)}/{Uri.EscapeDataString(repository)}/commits";
+        if (uri.AbsolutePath != expectedPath)
+        {
+            return null;
+        }
+
+        var queryString = uri.Query.StartsWith('?') ? uri.Query[1..] : uri.Query;
+        if (queryString.Length == 0)
+        {
+            return null;
+        }
+
+        var seenKeys = new HashSet<string>(StringComparer.Ordinal);
+        int? page = null;
+        var sawSince = false;
+        var sawUntil = false;
+        var sawPerPage = false;
+
+        // Deliberately NOT StringSplitOptions.RemoveEmptyEntries — a stray
+        // "&&" or trailing "&" must be rejected, not silently ignored.
+        foreach (var pair in queryString.Split('&'))
+        {
+            var equalsIndex = pair.IndexOf('=');
+            if (equalsIndex < 0)
+            {
+                return null;
+            }
+
+            var key = Uri.UnescapeDataString(pair[..equalsIndex]);
+            var value = Uri.UnescapeDataString(pair[(equalsIndex + 1)..]);
+
+            if (key.Length == 0 || value.Length == 0)
+            {
+                return null;
+            }
+
+            if (!seenKeys.Add(key))
+            {
+                // The same query key must never appear twice.
+                return null;
+            }
+
+            switch (key)
+            {
+                case "page":
+                    if (!int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var parsedPage) || parsedPage <= 0)
+                    {
+                        return null;
+                    }
+                    page = parsedPage;
+                    break;
+                case "per_page":
+                    if (value != "1")
+                    {
+                        return null;
+                    }
+                    sawPerPage = true;
+                    break;
+                case "since":
+                    if (!DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var since) ||
+                        since != expectedSinceUtc)
+                    {
+                        return null;
+                    }
+                    sawSince = true;
+                    break;
+                case "until":
+                    if (!DateTimeOffset.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.None, out var until) ||
+                        until != expectedUntilUtc)
+                    {
+                        return null;
+                    }
+                    sawUntil = true;
+                    break;
+                default:
+                    // Any parameter outside the expected set makes this
+                    // "last" link untrusted.
+                    return null;
+            }
+        }
+
+        return page is not null && sawSince && sawUntil && sawPerPage ? page : null;
+    }
 
     private static GitHubRepositoryResult ParseRepository(string body)
     {

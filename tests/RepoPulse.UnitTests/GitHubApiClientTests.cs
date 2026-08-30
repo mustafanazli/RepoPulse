@@ -1,4 +1,7 @@
+using System.Globalization;
 using System.Net;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Text;
 using RepoPulse.Core.Authentication;
 using RepoPulse.Core.Repositories;
@@ -1632,4 +1635,737 @@ public class GitHubApiClientTests
         Assert.DoesNotContain(marker, result.Commit!.ToString());
         Assert.DoesNotContain("0123456789abcdef0123456789abcdef01234567", result.Commit.ToString());
     }
+
+    // --- GetDefaultBranchCommitCountAsync (RP-016) ---
+    // No test here ever contacts the real GitHub network — every call goes
+    // through FakeHttpMessageHandler/ThrowingHttpMessageHandler, and no real
+    // GitHub token is ever used, only obviously-fake fixtures.
+
+    private static readonly DateTimeOffset CommitCountSinceUtc = new(2026, 1, 1, 0, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset CommitCountUntilUtc = new(2026, 2, 1, 0, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset CommitCountDifferentUtc = new(2026, 3, 1, 0, 0, 0, TimeSpan.Zero);
+
+    private static string EncodeInstant(DateTimeOffset value) =>
+        Uri.EscapeDataString(value.ToUniversalTime().ToString("o", CultureInfo.InvariantCulture));
+
+    private const string SingleCommitRecordJson = """[{"sha":"abc1234567890def","commit":{"committer":{"date":"2026-01-15T10:30:00Z"}}}]""";
+
+    private const string TwoCommitRecordsJson = """
+        [
+          {"sha":"aaa1111","commit":{"committer":{"date":"2026-01-15T10:30:00Z"}}},
+          {"sha":"bbb2222","commit":{"committer":{"date":"2026-01-14T10:30:00Z"}}}
+        ]
+        """;
+
+    private static string TrustedLastLinkHeader(int page, string owner = "mustafanazli", string repository = "RepoPulse") =>
+        $"<https://api.github.com/repos/{owner}/{repository}/commits?since={EncodeInstant(CommitCountSinceUtc)}&until={EncodeInstant(CommitCountUntilUtc)}&per_page=1&page={page}>; rel=\"last\"";
+
+    // 1. Correct endpoint and per_page=1.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_SendsExpectedEndpointAndPerPageOne()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("[]", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        var request = handler.LastRequest!;
+        Assert.Equal("https", request.RequestUri!.Scheme);
+        Assert.Equal("api.github.com", request.RequestUri.Host);
+        Assert.Equal("/repos/mustafanazli/RepoPulse/commits", request.RequestUri.AbsolutePath);
+        Assert.Contains("per_page=1", request.RequestUri.Query);
+    }
+
+    // 2. since/until sent as UTC ISO 8601 query values.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_SendsSinceAndUntilAsUtcIso8601RoundTrip()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("[]", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        var request = handler.LastRequest!;
+        Assert.Contains($"since={EncodeInstant(CommitCountSinceUtc)}", request.RequestUri!.Query);
+        Assert.Contains($"until={EncodeInstant(CommitCountUntilUtc)}", request.RequestUri.Query);
+    }
+
+    // 3. Different offsets representing the same UTC instant produce an identical query.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_DifferentOffsetsSameInstant_ProduceIdenticalQuery()
+    {
+        var sinceWithZeroOffset = CommitCountSinceUtc;
+        var sinceWithFiveHourOffset = CommitCountSinceUtc.ToOffset(TimeSpan.FromHours(5));
+        Assert.NotEqual(sinceWithZeroOffset.Offset, sinceWithFiveHourOffset.Offset);
+        Assert.Equal(sinceWithZeroOffset, sinceWithFiveHourOffset);
+
+        var handlerA = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("[]", Encoding.UTF8, "application/json")
+        });
+        var clientA = new GitHubApiClient(new HttpClient(handlerA));
+        await clientA.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", sinceWithZeroOffset, CommitCountUntilUtc, CancellationToken.None);
+
+        var handlerB = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("[]", Encoding.UTF8, "application/json")
+        });
+        var clientB = new GitHubApiClient(new HttpClient(handlerB));
+        await clientB.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", sinceWithFiveHourOffset, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.Equal(handlerA.LastRequest!.RequestUri!.Query, handlerB.LastRequest!.RequestUri!.Query);
+    }
+
+    // 4. since == until → InvalidRange, no network call at all.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_SinceEqualsUntil_ReturnsInvalidRangeWithoutNetworkCall()
+    {
+        var handler = new FakeHttpMessageHandler(_ => throw new InvalidOperationException("Must not contact the network for an invalid range."));
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountSinceUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.InvalidRange, result.FailureKind);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    // 5. since > until → InvalidRange, no network call at all.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_SinceAfterUntil_ReturnsInvalidRangeWithoutNetworkCall()
+    {
+        var handler = new FakeHttpMessageHandler(_ => throw new InvalidOperationException("Must not contact the network for an invalid range."));
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountUntilUtc, CommitCountSinceUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.InvalidRange, result.FailureKind);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    // 6. 200 + empty array + no Link → 0.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_EmptyArrayNoLink_ReturnsZero()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("[]", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(0, result.Count);
+    }
+
+    // 7. GitHub's 409 "empty repository" → also 0, not a failure.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_Conflict409_ReturnsZero()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage((HttpStatusCode)409)
+        {
+            Content = new StringContent("""{"message":"Git Repository is empty."}""", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(0, result.Count);
+    }
+
+    // 8. Single record, no Link header → 1.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_SingleRecordNoLink_ReturnsOne()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitRecordJson, Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(1, result.Count);
+    }
+
+    // 9. Trusted rel="last" page=2 → 2.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_TrustedLastPageTwo_ReturnsTwo()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitRecordJson, Encoding.UTF8, "application/json"),
+            Headers = { { "Link", TrustedLastLinkHeader(2) } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(2, result.Count);
+    }
+
+    // 10. Trusted rel="last" with a large positive page value.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_TrustedLastPageLargeValue_ReturnsThatValue()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitRecordJson, Encoding.UTF8, "application/json"),
+            Headers = { { "Link", TrustedLastLinkHeader(48213) } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(48213, result.Count);
+    }
+
+    // 11. Owner/repository path encoding.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_EncodesOwnerAndRepositorySegments()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("[]", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        await client.GetDefaultBranchCommitCountAsync("test-access-token", "owner name", "repo/name", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        var request = handler.LastRequest!;
+        Assert.StartsWith("https://api.github.com/repos/owner%20name/repo%2Fname/commits?", request.RequestUri!.AbsoluteUri);
+    }
+
+    // 12. Token only in the Authorization header, never in the query.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_TokenOnlyInAuthorizationHeader_NeverInQuery()
+    {
+        const string token = "SUPER-SECRET-TOKEN-commitcount-abc123";
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("[]", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        await client.GetDefaultBranchCommitCountAsync(token, "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        var request = handler.LastRequest!;
+        Assert.DoesNotContain(token, request.RequestUri!.ToString());
+        Assert.Null(request.Content);
+        Assert.Equal("Bearer", request.Headers.Authorization!.Scheme);
+        Assert.Equal(token, request.Headers.Authorization.Parameter);
+        Assert.Equal("RepoPulse", request.Headers.UserAgent.ToString());
+        Assert.Equal("2022-11-28", request.Headers.GetValues("X-GitHub-Api-Version").Single());
+        Assert.Contains(request.Headers.Accept, h => h.MediaType == "application/vnd.github+json");
+    }
+
+    // 13. 401 → Unauthorized.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_Unauthorized_ReturnsUnauthorizedFailureKind()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.Unauthorized)
+        {
+            Content = new StringContent("{}", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unauthorized, result.FailureKind);
+        Assert.Null(result.Count);
+    }
+
+    // 14 & 15. 403 and 429 → RateLimited.
+    [Theory]
+    [InlineData(HttpStatusCode.Forbidden)]
+    [InlineData((HttpStatusCode)429)]
+    public async Task GetDefaultBranchCommitCountAsync_ForbiddenOrTooManyRequests_ReturnsRateLimitedFailureKind(HttpStatusCode statusCode)
+    {
+        const string marker = "RATE-LIMIT-BODY-MARKER-commitcount-9f3a";
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(statusCode)
+        {
+            Content = new StringContent($$"""{"message":"{{marker}}"}""", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.RateLimited, result.FailureKind);
+        Assert.Null(result.Count);
+    }
+
+    // 16. 404 → NotFound.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_NotFound_ReturnsNotFoundFailureKind()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.NotFound)
+        {
+            Content = new StringContent("""{"message":"Not Found"}""", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "does-not-exist", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.NotFound, result.FailureKind);
+    }
+
+    // 17. HttpRequestException → NetworkError.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_NetworkException_ReturnsNetworkErrorFailureKindSafely()
+    {
+        var handler = new ThrowingHttpMessageHandler(new HttpRequestException("connection refused"));
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.NetworkError, result.FailureKind);
+    }
+
+    // 18. WebException → NetworkError (Xamarin.Android raw-socket-failure shape).
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_WebException_ReturnsNetworkErrorFailureKindSafely()
+    {
+        var handler = new ThrowingHttpMessageHandler(new WebException("Socket closed"));
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.NetworkError, result.FailureKind);
+    }
+
+    // 19. Malformed JSON → Unexpected, never throws.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_MalformedJson_ReturnsUnexpectedFailureAndDoesNotThrow()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("{not valid", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+    }
+
+    // 20. Non-array JSON body → Unexpected.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_NonArrayJson_ReturnsUnexpectedFailure()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("""{"message":"not an array"}""", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+    }
+
+    // 21. Two records despite per_page=1 → Unexpected, never silently truncated to the first.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_TwoRecordsDespitePerPageOne_ReturnsUnexpectedFailure()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(TwoCommitRecordsJson, Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+    }
+
+    // 22. Empty array alongside a Link header is a contradiction → Unexpected.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_EmptyArrayWithLinkHeader_ReturnsUnexpectedFailure()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("[]", Encoding.UTF8, "application/json"),
+            Headers = { { "Link", TrustedLastLinkHeader(2) } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+    }
+
+    // 23. A completely malformed Link header value.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_MalformedLastLink_ReturnsUnexpectedFailure()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitRecordJson, Encoding.UTF8, "application/json"),
+            Headers = { { "Link", "<not-a-valid-uri>; rel=\"last\"" } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+    }
+
+    // 24-38. Every way a rel="last" URL can fail the trust check — none may
+    // ever be followed, and none may ever result in a guessed count.
+    public static IEnumerable<object[]> UntrustedLastLinkHeaders()
+    {
+        var since = EncodeInstant(CommitCountSinceUtc);
+        var until = EncodeInstant(CommitCountUntilUtc);
+        var differentSince = EncodeInstant(CommitCountDifferentUtc);
+        const string validPath = "/repos/mustafanazli/RepoPulse/commits";
+
+        static string Link(string schemeAndHost, string path, string query, string fragment = "") =>
+            $"<{schemeAndHost}{path}?{query}{fragment}>; rel=\"last\"";
+
+        var validQuery = $"since={since}&until={until}&per_page=1&page=2";
+
+        yield return new object[] { Link("http://api.github.com", validPath, validQuery) };                                  // 24. wrong scheme
+        yield return new object[] { Link("https://evil.example.com", validPath, validQuery) };                               // 25. wrong host
+        yield return new object[] { Link("https://api.github.com:8443", validPath, validQuery) };                            // 26. explicit port
+        yield return new object[] { Link("https://user:pass@api.github.com", validPath, validQuery) };                       // 27. userinfo
+        yield return new object[] { Link("https://api.github.com", validPath, validQuery, "#frag") };                        // 28. fragment
+        yield return new object[] { Link("https://api.github.com", "/repos/mustafanazli/OtherRepo/commits", validQuery) };   // 29. wrong path
+        yield return new object[] { Link("https://api.github.com", validPath, validQuery + "&evil=1") };                     // 30. unknown query key
+        yield return new object[] { Link("https://api.github.com", validPath, validQuery + "&page=2") };                     // 31. duplicate page
+        yield return new object[] { Link("https://api.github.com", validPath, $"since={since}&since={since}&until={until}&per_page=1&page=2") }; // 32a. duplicate since
+        yield return new object[] { Link("https://api.github.com", validPath, $"since={since}&until={until}&until={until}&per_page=1&page=2") }; // 32b. duplicate until
+        yield return new object[] { Link("https://api.github.com", validPath, $"since={since}&until={until}&per_page=1&per_page=1&page=2") };    // 32c. duplicate per_page
+        yield return new object[] { Link("https://api.github.com", validPath, $"since={since}&until={until}&per_page=1&page=2&=x") };            // 33a. empty key
+        yield return new object[] { Link("https://api.github.com", validPath, $"since={since}&until={until}&per_page=1&page=") };                // 33b. empty value
+        yield return new object[] { Link("https://api.github.com", validPath, $"since={since}&until={until}&per_page=2&page=2") };               // 34. per_page != 1
+        yield return new object[] { Link("https://api.github.com", validPath, $"since={differentSince}&until={until}&per_page=1&page=2") };      // 35. since mismatch
+        yield return new object[] { Link("https://api.github.com", validPath, $"since={since}&until={differentSince}&per_page=1&page=2") };      // 36. until mismatch
+        yield return new object[] { Link("https://api.github.com", validPath, $"since={since}&until={until}&per_page=1&page=0") };               // 37a. page zero
+        yield return new object[] { Link("https://api.github.com", validPath, $"since={since}&until={until}&per_page=1&page=-1") };              // 37b. page negative
+        yield return new object[] { Link("https://api.github.com", validPath, $"since={since}&until={until}&per_page=1&page=99999999999999999999") }; // 38. page overflow
+    }
+
+    [Theory]
+    [MemberData(nameof(UntrustedLastLinkHeaders))]
+    public async Task GetDefaultBranchCommitCountAsync_UntrustedLastLink_ReturnsUnexpectedFailureAndDoesNotGuessCount(string linkHeaderValue)
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitRecordJson, Encoding.UTF8, "application/json"),
+            Headers = { { "Link", linkHeaderValue } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+        Assert.Null(result.Count);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    // 39. Duplicate/conflicting rel="last" entries → Unexpected, never guess which to trust.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_DuplicateLastRelation_ReturnsUnexpectedFailure()
+    {
+        var linkHeader = $"{TrustedLastLinkHeader(2)}, {TrustedLastLinkHeader(3)}";
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitRecordJson, Encoding.UTF8, "application/json"),
+            Headers = { { "Link", linkHeader } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+    }
+
+    // 40. Query parameters in a different order but semantically identical → still accepted.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_LastLinkParametersInDifferentOrder_IsStillAccepted()
+    {
+        var since = EncodeInstant(CommitCountSinceUtc);
+        var until = EncodeInstant(CommitCountUntilUtc);
+        var reorderedLink = $"<https://api.github.com/repos/mustafanazli/RepoPulse/commits?page=2&per_page=1&until={until}&since={since}>; rel=\"last\"";
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitRecordJson, Encoding.UTF8, "application/json"),
+            Headers = { { "Link", reorderedLink } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(2, result.Count);
+    }
+
+    // 41. The rel="last" URL is only ever inspected, never followed — exactly one request total.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_NeverFollowsLastLink_SendsExactlyOneRequest()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(SingleCommitRecordJson, Encoding.UTF8, "application/json"),
+            Headers = { { "Link", TrustedLastLinkHeader(50) } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(50, result.Count);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    // 42. Cancellation propagates rather than being swallowed as a typed failure.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_CancellationRequested_ThrowsOperationCanceled()
+    {
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+        var handler = new ThrowingHttpMessageHandler(new OperationCanceledException());
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, cts.Token));
+    }
+
+    // --- Response-shape hardening (targeted post-PR #18 audit) ---
+    // A JSON array of length 1 only proves something is present — never that
+    // it is a commit. Every one of these bodies is syntactically valid JSON
+    // but must still be rejected as Unexpected before Success(1) or a Link
+    // header's rel="last" count is ever trusted.
+
+    private const string MinimalValidCommitListItemJson = """[{"sha":"test-sha","commit":{}}]""";
+
+    // 1-14. Every way the sole array element can fail the minimum
+    // commit-list-item shape check.
+    public static IEnumerable<object[]> InvalidCommitListItemShapes()
+    {
+        yield return new object[] { "[null]" };                                  // 1
+        yield return new object[] { """["x"]""" };                               // 2
+        yield return new object[] { "[42]" };                                    // 3
+        yield return new object[] { "[true]" };                                  // 4
+        yield return new object[] { "[[]]" };                                    // 5
+        yield return new object[] { "[{}]" };                                    // 6
+        yield return new object[] { """[{"sha":"abc"}]""" };                     // 7. missing commit
+        yield return new object[] { """[{"commit":{}}]""" };                     // 8. missing sha
+        yield return new object[] { """[{"sha":null,"commit":{}}]""" };          // 9
+        yield return new object[] { """[{"sha":"","commit":{}}]""" };            // 10
+        yield return new object[] { """[{"sha":"   ","commit":{}}]""" };         // 11
+        yield return new object[] { """[{"sha":42,"commit":{}}]""" };            // 12
+        yield return new object[] { """[{"sha":"abc","commit":null}]""" };       // 13
+        yield return new object[] { """[{"sha":"abc","commit":"x"}]""" };        // 14
+    }
+
+    [Theory]
+    [MemberData(nameof(InvalidCommitListItemShapes))]
+    public async Task GetDefaultBranchCommitCountAsync_InvalidItemShapeNoLink_ReturnsUnexpectedFailure(string body)
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+        Assert.Null(result.Count);
+        // 18. Exactly one request is ever sent, regardless of the malformed shape.
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    // 15. A genuinely minimal valid item with no Link header → 1.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_MinimalValidItemNoLink_ReturnsOne()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(MinimalValidCommitListItemJson, Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(1, result.Count);
+    }
+
+    // 16. A genuinely minimal valid item with a trusted rel="last" → that page count.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_MinimalValidItemWithTrustedLast_ReturnsThatCount()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(MinimalValidCommitListItemJson, Encoding.UTF8, "application/json"),
+            Headers = { { "Link", TrustedLastLinkHeader(7) } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(7, result.Count);
+    }
+
+    // 17. An invalid item shape alongside a trusted rel="last" must still be
+    // rejected — the Link header's count is never consulted (let alone
+    // trusted) once the item itself fails the shape check.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_InvalidItemShapeWithTrustedLast_ReturnsUnexpectedAndIgnoresLinkCount()
+    {
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent("[{}]", Encoding.UTF8, "application/json"),
+            Headers = { { "Link", TrustedLastLinkHeader(999) } }
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+        Assert.NotEqual(999, result.Count);
+        Assert.Null(result.Count);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    // 19. A raw sha/body marker never leaks into the result, and no exception is thrown.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_InvalidItemShape_DoesNotLeakRawShaOrBodyAndDoesNotThrow()
+    {
+        const string marker = "MARKER-RAW-SHA-OR-BODY-commitcount-9f3a";
+        var handler = new FakeHttpMessageHandler(_ => new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent($$"""[{"sha":"{{marker}}"}]""", Encoding.UTF8, "application/json")
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync("test-access-token", "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.Unexpected, result.FailureKind);
+        // GitHubCommitCountResult carries no free-text field at all — only
+        // Count (null here) and the FailureKind enum — so there is
+        // structurally nowhere for the raw sha or body to leak into.
+        Assert.Null(result.Count);
+    }
+
+    // 20. Regression: the full existing suite (552 tests prior to this
+    // hardening) is re-run as part of this same test assembly on every
+    // build — no dedicated test needed here beyond that shared run.
+
+    // 43. GitHubCommitCountResult invariants — construction is restricted,
+    // Count is never negative, and Count/FailureKind are mutually exclusive.
+    [Fact]
+    public void GitHubCommitCountResult_HasNoPublicConstructor()
+    {
+        var constructors = typeof(GitHubCommitCountResult).GetConstructors(BindingFlags.Public | BindingFlags.Instance);
+        Assert.Empty(constructors);
+    }
+
+    [Fact]
+    public void GitHubCommitCountResult_Success_NegativeCount_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => GitHubCommitCountResult.Success(-1));
+    }
+
+    [Fact]
+    public void GitHubCommitCountResult_Success_HasCountAndNullFailureKind()
+    {
+        var result = GitHubCommitCountResult.Success(5);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(5, result.Count);
+        Assert.Null(result.FailureKind);
+    }
+
+    [Fact]
+    public void GitHubCommitCountResult_Failure_HasNullCount()
+    {
+        var result = GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.NotFound);
+
+        Assert.False(result.IsSuccess);
+        Assert.Null(result.Count);
+        Assert.Equal(GitHubCommitCountFailureKind.NotFound, result.FailureKind);
+    }
+
+    // 44. Token, raw response body, and raw headers never leak into the typed result.
+    [Fact]
+    public async Task GetDefaultBranchCommitCountAsync_ErrorResponse_DoesNotExposeRawBodyTokenOrHeaders()
+    {
+        const string token = "SUPER-SECRET-TOKEN-commitcount-error-abc123";
+        const string marker = "RAW-ERROR-BODY-MARKER-commitcount-9f3a";
+        var handler = new FakeHttpMessageHandler(_ =>
+        {
+            var response = new HttpResponseMessage((HttpStatusCode)429)
+            {
+                Content = new StringContent($$"""{"message":"{{marker}}"}""", Encoding.UTF8, "application/json")
+            };
+            response.Headers.Add("X-RateLimit-Remaining", "0");
+            return response;
+        });
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var result = await client.GetDefaultBranchCommitCountAsync(token, "mustafanazli", "RepoPulse", CommitCountSinceUtc, CommitCountUntilUtc, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubCommitCountFailureKind.RateLimited, result.FailureKind);
+        // The typed result carries no free-text field at all for failures —
+        // only the enum — so there is structurally nowhere for the raw body
+        // or rate-limit headers to leak into.
+        Assert.Null(result.Count);
+        var request = handler.LastRequest!;
+        Assert.DoesNotContain(token, request.RequestUri!.ToString());
+    }
+
+    // 45. GitHubApiClient itself never reads the system clock.
+    [Fact]
+    public void GitHubApiClient_NeverReadsSystemClockDirectly()
+    {
+        var source = File.ReadAllLines(GetGitHubApiClientSourcePath());
+        var codeOnly = string.Join('\n', source.Where(line => !line.TrimStart().StartsWith("//")));
+
+        Assert.DoesNotContain("DateTime.Now", codeOnly);
+        Assert.DoesNotContain("DateTimeOffset.Now", codeOnly);
+        Assert.DoesNotContain(".UtcNow", codeOnly);
+    }
+
+    private static string GetGitHubApiClientSourcePath([CallerFilePath] string testFilePath = "")
+    {
+        var testDirectory = Path.GetDirectoryName(testFilePath)!;
+        return Path.GetFullPath(Path.Combine(
+            testDirectory, "..", "..", "src", "RepoPulse.Core", "Authentication", "GitHubApiClient.cs"));
+    }
+
+    // 46. Regression: the full existing RP-001–RP-015 suite is re-run as part
+    // of this same test assembly on every build — no dedicated test needed
+    // here beyond that shared run.
 }
