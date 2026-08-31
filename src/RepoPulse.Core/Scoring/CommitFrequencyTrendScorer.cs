@@ -34,7 +34,10 @@ namespace RepoPulse.Core.Scoring;
 //   - A negative non-null count can only come from a producer bug (RP-016's
 //     own Success() factory already guards against ever producing a
 //     negative Count) — Score() throws ArgumentOutOfRangeException rather
-//     than silently clamping it, so such a bug is never hidden.
+//     than silently clamping it, so such a bug is never hidden. This check
+//     runs BEFORE the null check: a non-null negative count is rejected even
+//     when the OTHER parameter is null, so a missing count on one side can
+//     never mask a producer bug on the other side as NoData.
 //
 // OVERLAP CORRECTION: the 90-day count already includes the 30-day window,
 // so the two raw counts are never compared directly. The non-overlapping
@@ -97,19 +100,25 @@ public static class CommitFrequencyTrendScorer
 
     public static CommitFrequencyTrendScore Score(int? last30DayCommitCount, int? last90DayCommitCount)
     {
-        if (last30DayCommitCount is null || last90DayCommitCount is null)
-        {
-            return CommitFrequencyTrendScore.NoData();
-        }
-
-        if (last30DayCommitCount.Value < 0)
+        // Negative non-null values are validated BEFORE the null check below.
+        // A negative count can only come from a producer bug, and that bug
+        // must never be masked as NoData just because the OTHER parameter
+        // happens to be null — e.g. Score(null, -1) must throw, not silently
+        // report "no data", because the -1 is a real invariant violation
+        // regardless of what the other argument is.
+        if (last30DayCommitCount is < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(last30DayCommitCount), last30DayCommitCount.Value, "Commit count cannot be negative.");
         }
 
-        if (last90DayCommitCount.Value < 0)
+        if (last90DayCommitCount is < 0)
         {
             throw new ArgumentOutOfRangeException(nameof(last90DayCommitCount), last90DayCommitCount.Value, "Commit count cannot be negative.");
+        }
+
+        if (last30DayCommitCount is null || last90DayCommitCount is null)
+        {
+            return CommitFrequencyTrendScore.NoData();
         }
 
         // All arithmetic from here on is long-based: the largest possible

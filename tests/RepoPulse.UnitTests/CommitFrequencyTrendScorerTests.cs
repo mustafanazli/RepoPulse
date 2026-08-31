@@ -480,6 +480,77 @@ public class CommitFrequencyTrendScorerTests
         }
     }
 
+    // --- Negative+null guard-order hardening (post-review fix) ---
+    // These scenarios prove that a non-null negative count is rejected
+    // BEFORE the null check runs, so a missing count on one side can never
+    // mask a producer bug (a negative count) on the other side as NoData.
+
+    // Score(null, -1) -> ArgumentOutOfRangeException on last90DayCommitCount,
+    // not NoData. The null 30-day count must not hide the invalid 90-day count.
+    [Fact]
+    public void NullThirtyDayWithNegativeNinetyDayCount_ThrowsArgumentOutOfRangeExceptionForNinetyDay()
+    {
+        var exception = Assert.Throws<ArgumentOutOfRangeException>(() => CommitFrequencyTrendScorer.Score(null, -1));
+
+        Assert.Equal("last90DayCommitCount", exception.ParamName);
+    }
+
+    // Score(-1, null) -> ArgumentOutOfRangeException on last30DayCommitCount,
+    // not NoData. The null 90-day count must not hide the invalid 30-day count.
+    [Fact]
+    public void NegativeThirtyDayWithNullNinetyDayCount_ThrowsArgumentOutOfRangeExceptionForThirtyDay()
+    {
+        var exception = Assert.Throws<ArgumentOutOfRangeException>(() => CommitFrequencyTrendScorer.Score(-1, null));
+
+        Assert.Equal("last30DayCommitCount", exception.ParamName);
+    }
+
+    // Score(null, int.MinValue) -> still an exception, not NoData.
+    [Fact]
+    public void NullThirtyDayWithIntMinValueNinetyDayCount_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => CommitFrequencyTrendScorer.Score(null, int.MinValue));
+    }
+
+    // Score(int.MinValue, null) -> still an exception, not NoData.
+    [Fact]
+    public void IntMinValueThirtyDayWithNullNinetyDayCount_Throws()
+    {
+        Assert.Throws<ArgumentOutOfRangeException>(() => CommitFrequencyTrendScorer.Score(int.MinValue, null));
+    }
+
+    // Score(null, 0) -> NoData (0 is a valid, non-negative count; only the
+    // null makes this NoData, not the value itself).
+    [Fact]
+    public void NullThirtyDayWithZeroNinetyDayCount_ScoresNoData()
+    {
+        var result = CommitFrequencyTrendScorer.Score(null, 0);
+
+        Assert.Null(result.Value);
+        Assert.Equal(CommitFrequencyTrendBand.NoData, result.Band);
+    }
+
+    // Score(0, null) -> NoData, for the same reason.
+    [Fact]
+    public void ZeroThirtyDayWithNullNinetyDayCount_ScoresNoData()
+    {
+        var result = CommitFrequencyTrendScorer.Score(0, null);
+
+        Assert.Null(result.Value);
+        Assert.Equal(CommitFrequencyTrendBand.NoData, result.Band);
+    }
+
+    // Score(-1, -1) -> deterministic rejection on the FIRST-checked
+    // parameter (last30DayCommitCount), proving guard order is fixed and
+    // not incidental.
+    [Fact]
+    public void BothCountsNegative_ThrowsArgumentOutOfRangeExceptionForThirtyDayFirst()
+    {
+        var exception = Assert.Throws<ArgumentOutOfRangeException>(() => CommitFrequencyTrendScorer.Score(-1, -1));
+
+        Assert.Equal("last30DayCommitCount", exception.ParamName);
+    }
+
     // 37. Regression: RP-015's ActivityRecencyScorer suite is unaffected —
     // covered by the shared full-assembly test run (see
     // ActivityRecencyScorerTests.cs).
