@@ -56,11 +56,21 @@ public static class CommitFrequencyScorer
     public const string AlgorithmVersion = "0.1.0";
     public const int WindowDays = 30;
 
+    // RP-017 hardening: the single source of truth for the band boundaries.
+    // CommitFrequencyScore's band factories (Low/Moderate/High) guard against
+    // exactly these same bounds, so the threshold table can never silently
+    // diverge between "what Score() routes to" and "what the factory accepts".
+    public const int LowMinCommitCount = 1;
+    public const int LowMaxCommitCount = 4;
+    public const int ModerateMinCommitCount = 5;
+    public const int ModerateMaxCommitCount = 14;
+    public const int HighMinCommitCount = 15;
+
     public static CommitFrequencyScore Score(int? commitCount)
     {
         if (commitCount is null)
         {
-            return CommitFrequencyScore.Create(null, CommitFrequencyBand.NoData, AlgorithmVersion, null, WindowDays);
+            return CommitFrequencyScore.NoData();
         }
 
         if (commitCount.Value < 0)
@@ -72,22 +82,22 @@ public static class CommitFrequencyScorer
 
         if (count == 0)
         {
-            return CommitFrequencyScore.Create(0, CommitFrequencyBand.Inactive, AlgorithmVersion, count, WindowDays);
+            return CommitFrequencyScore.Inactive();
         }
 
-        if (count <= 4)
+        if (count <= LowMaxCommitCount)
         {
-            return CommitFrequencyScore.Create(40, CommitFrequencyBand.Low, AlgorithmVersion, count, WindowDays);
+            return CommitFrequencyScore.Low(count);
         }
 
-        if (count <= 14)
+        if (count <= ModerateMaxCommitCount)
         {
-            return CommitFrequencyScore.Create(70, CommitFrequencyBand.Moderate, AlgorithmVersion, count, WindowDays);
+            return CommitFrequencyScore.Moderate(count);
         }
 
         // No arithmetic (addition/multiplication) is ever performed on
         // count — only comparisons — so an extreme value like int.MaxValue
         // can never overflow; it simply falls through to the highest band.
-        return CommitFrequencyScore.Create(100, CommitFrequencyBand.High, AlgorithmVersion, count, WindowDays);
+        return CommitFrequencyScore.High(count);
     }
 }
