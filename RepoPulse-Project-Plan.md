@@ -315,6 +315,28 @@ Zaman sözleşmesi: `sinceUtc`/`untilUtc` her zaman caller'dan geliyor (`DateTim
 
 570/570 `RepoPulse.UnitTests` (500'e +70) ve 51/51 `RepoPulse.AuthApi.Tests` geçiyor; yeni NuGet paketi eklenmedi; emülatör/gerçek GitHub isteği/Azure staging bu turda yapılmadı (Core/API-only, gerekmiyor). Faz 2'nin genel çıkış kriterleri henüz `[ ]`.
 
+**RP-017 — 30 günlük commit sıklığı puanı — TAMAMLANDI.** Faz 2 / issue `#13`'ün Aktivite alt puanına ikinci dikey dilimini ekler: `RepoPulse.Core.Scoring.CommitFrequencyScorer.Score(int? commitCount)` — RP-016'nın ürettiği **doğrulanmış** default-branch commit sayısını (`GitHubCommitCountResult.Count`, yalnızca `IsSuccess=true` iken) sabit **30 günlük** pencere için deterministik bir 0–100 puana çevirir. Trend/90 günlük karşılaştırma, recency+frequency birleşimi, Aktivite'nin bütünü, diğer dört alt puan, ağırlıklı Genel Sağlık Puanı ve her türlü UI/API/SQLite bağlantısı bu turun kapsamı dışında bırakıldı — hiçbiri tamamlanmış sayılmıyor. Plan metni yalnızca "son 30 ve 90 gündeki commit sıklığı" biçiminde nitel bir madde içeriyor (kesin eşik/puan tanımlamıyor), bu yüzden bu turda aşağıdaki RP-017 v0.1.0 eşik/puan politikası tanımlanıp kaydedildi:
+
+| 30 günlük commit sayısı | Puan | Bant |
+|---|---:|---|
+| Veri alınamadı (RP-016 `IsSuccess=false`) | puan yok (`null`) | `NoData` |
+| 0 | 0 | `Inactive` |
+| 1–4 | 40 | `Low` |
+| 5–14 | 70 | `Moderate` |
+| 15+ | 100 | `High` |
+
+**NoData ile 0 commit ayrımı açıkça korundu:** `commitCount == null` yalnızca "RP-016 çağrısı başarılı olmadı, sayı elde edilemedi" anlamına gelir — bu bir sıfır puan değildir; `Value=null`/`Band=NoData` olarak raporlanır ki gelecekteki Genel Sağlık Puanı hesaplaması "bilmiyoruz"u "biliyoruz, sıfır"dan ayrı ele alabilsin. `commitCount == 0` ise RP-016'nın gerçekten başarıyla çalışıp pencerede commit bulamadığını temsil eder — `Value=0`/`Band=Inactive`.
+
+Mimari: `RepoPulse.Core.Scoring` altında `CommitFrequencyBand` (`NoData`/`Inactive`/`Low`/`Moderate`/`High`), `CommitFrequencyScore` (immutable `record`; private constructor + bant-özel `internal` factory'ler — bkz. aşağıdaki Sertleştirme notu), `CommitFrequencyScorer` (saf/statik, sistem saatini hiç okumuyor, `windowDays` caller parametresi değil — sabit `WindowDays=30` sabiti, farklı bir pencere asla sessizce aynı eşiklerle puanlanamaz). Negatif `commitCount` (yalnızca üretici hatası olabilir, RP-016'nın kendi `Success()` factory'si zaten negatifi engelliyor) sessizce clamp edilmeden `ArgumentOutOfRangeException` ile reddediliyor. Algoritma kimliği: `ComponentId="commit-frequency"`, `AlgorithmVersion="0.1.0"` — eşik tablosu değişirse sürüm artırılmalı.
+
+**Bilinen metrik sınırlamaları (kaynak kodda ve burada açıkça belirtildi):** Bu yalnızca RP-016'nın sınırladığı default-branch commit **adet** sinyalidir — commit kalitesini ölçmez; çok commit her zaman yüksek kod kalitesi anlamına gelmez; merge commit, bot commit veya küçük/parçalanmış commit ayrımı yapılmaz. Bu nedenle yalnızca Aktivite alt puanının bir bileşeni olarak kullanılmalı, asla tek başına "Genel Sağlık Puanı" gibi sunulmamalıdır.
+
+41 yeni unit test (`CommitFrequencyScorerTests.cs`) — null/0/1/4/5/14/15/`int.MaxValue` sınır değerleri (yaklaşıklık yok, tam sayı karşılaştırması), null'un 0'dan bant olarak ayrımı, negatif ve `int.MinValue` için `ArgumentOutOfRangeException`, determinizm, `AlgorithmVersion`/`ComponentId`/`WindowDays` sabitleri, `NoData`'nın `Value=null` olduğu, Value'nun her zaman 0–100 veya null olduğu, Band-Value eşleşmesi, `ObservedCommitCount`'un girdiyle eşleştiği ve yalnızca `NoData`'da null olduğu, `CommitFrequencyScore`'un public constructor/factory taşımadığı (reflection), sistem saatinin hiç okunmadığının kaynak taramasıyla kanıtı, token/session/client/http/repository şeklinde alan bulunmadığı, ve farklı `CurrentCulture` (tr-TR/de-DE) altında aynı sonucun üretildiği kapsanıyor.
+
+**Sertleştirme (aynı RP-017 içinde, merge öncesi denetimde bulundu):** İlk sürümde `CommitFrequencyScore`'un `internal static Create(value, band, algorithmVersion, observedCommitCount, windowDays)` factory'si erişimi kısıtlıyordu ama hiçbir parametreyi doğrulamıyordu — `RepoPulse.Core` derlemesi içindeki herhangi bir kod, örneğin `Create(0, NoData, "9.9.9", 500, 999)` gibi çağrılarla, dokümante edilen invariant'ları (Band-Value eşleşmesi, `NoData`⇔null-count, sabit `AlgorithmVersion`/`WindowDays`) ihlal eden bir sonuç üretebilirdi. Genel/keyfi parametreli `Create` tamamen kaldırıldı; yerine yalnızca kendi geçerli durumunu üretebilen bant-özel internal factory'ler getirildi: `NoData()`, `Inactive()` (parametresiz, `Value`/`Band`/`ObservedCommitCount` sabit), `Low(int)`/`Moderate(int)`/`High(int)` (yalnızca kendi bant aralığındaki `ObservedCommitCount`'u kabul eder, aralık dışı bir değer `ArgumentOutOfRangeException` ile reddedilir). `AlgorithmVersion`/`WindowDays` artık hiçbir factory'de caller parametresi değil — private constructor bunları doğrudan `CommitFrequencyScorer.AlgorithmVersion`/`WindowDays` sabitlerinden okuyor, sahte bir sürüm/pencere üretmenin hiçbir yolu kalmadı. Bant sınırları (`Low`: 1–4, `Moderate`: 5–14, `High`: 15+) tek kaynakta merkezileşti — `CommitFrequencyScorer`'ın yeni `LowMinCommitCount`/`LowMaxCommitCount`/`ModerateMinCommitCount`/`ModerateMaxCommitCount`/`HighMinCommitCount` sabitleri hem `Score()`'un yönlendirme mantığında hem `CommitFrequencyScore`'un factory guard'larında aynı anda kullanılıyor, böylece eşik tablosu iki yerde sessizce farklılaşamaz. 26 ek test (bant factory'lerinin sınır/dışı-değer davranışı, generic `Create`'in artık var olmadığının ve hiçbir factory'nin `string`/fazladan `int` parametre almadığının reflection'la kanıtı, `Score()`'un doğru factory'ye yönlendirdiğinin ve her sonucun tam `0.1.0`/`30` taşıdığının regresyon testi, negatif girdi reddinin regresyonu) eklendi.
+
+637/637 `RepoPulse.UnitTests` (611'e +26) ve 51/51 `RepoPulse.AuthApi.Tests` geçiyor; yeni NuGet paketi eklenmedi; emülatör/GitHub API isteği/Azure staging bu turda yapılmadı (Core-only, gerekmiyor). Faz 2'nin genel çıkış kriterleri henüz `[ ]`.
+
 ### Faz 0 — Tasarım ve doğrulama
 
 Issue'lar:
@@ -357,7 +379,7 @@ Issue'lar:
 ### Faz 2 — Analiz motoru
 
 Issue'lar:
-- `#13` Domain katmanında alt puan hesaplama kuralları (Aktivite, Bakım, CI/CD, Dokümantasyon, Topluluk) — API istemcisinden bağımsız saf fonksiyonlar olarak — **kısmen: Aktivite'nin yalnızca "son commit güncelliği" bileşeni RP-015 ile TAMAMLANDI; commit sıklığının veri-toplama dilimi (varsayılan branch, caller-verilen zaman aralığı) RP-016 ile TAMAMLANDI** (commit sıklığı puanı, 30/90 gün trendi, Aktivite'nin bütünü, diğer dört alt puan hâlâ açık)
+- `#13` Domain katmanında alt puan hesaplama kuralları (Aktivite, Bakım, CI/CD, Dokümantasyon, Topluluk) — API istemcisinden bağımsız saf fonksiyonlar olarak — **kısmen: Aktivite'nin yalnızca "son commit güncelliği" bileşeni RP-015 ile TAMAMLANDI; commit sıklığının veri-toplama dilimi RP-016 ile TAMAMLANDI; commit sıklığının 30 günlük puanlama bileşeni RP-017 ile TAMAMLANDI** (90 gün trendi, recency+frequency birleşik Aktivite puanı, diğer dört alt puan hâlâ açık)
 - `#14` Genel sağlık puanı ağırlıklı toplama motoru + algoritma sürüm etiketleme (`scoring-vX.Y.Z`)
 - `#15` Puan gerekçesi/açıklama metinlerinin üretimi (neden yükseldi/düştü)
 - `#16` En fazla üç öncelikli iyileştirme önerisi üretme kuralları
