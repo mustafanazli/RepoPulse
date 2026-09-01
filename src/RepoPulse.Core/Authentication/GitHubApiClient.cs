@@ -2,7 +2,9 @@ using System.Globalization;
 using System.Linq;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using RepoPulse.Core.Repositories;
 
 namespace RepoPulse.Core.Authentication;
@@ -30,6 +32,23 @@ public interface IGitHubApiClient
         DateTimeOffset sinceUtc,
         DateTimeOffset untilUtc,
         CancellationToken cancellationToken);
+
+    // RP-020: the oldest OPEN issue on the repository, by creation time —
+    // the first data-collection slice for the future Bakım (maintenance)
+    // sub-score. Uses GitHub's GraphQL API, not REST's
+    // /repos/{owner}/{repo}/issues: that REST endpoint's response mixes pull
+    // requests into the same list as issues, so a per_page=1 read (which
+    // would otherwise mirror GetLatestRepositoryCommitAsync's shape) cannot
+    // prove "this is the oldest OPEN ISSUE" — the first record might be a
+    // PR, and filtering it client-side would silently return the wrong
+    // (second-oldest, or later) issue instead. GraphQL's
+    // repository.issues(states: OPEN, ...) connection excludes pull requests
+    // by construction, so a single first:1 query is sufficient and correct.
+    Task<GitHubOldestOpenIssueResult> GetOldestOpenIssueAsync(
+        string accessToken,
+        string owner,
+        string repository,
+        CancellationToken cancellationToken);
 }
 
 // Single responsibility: GET /user. Does not know about OAuth, PKCE, or the
@@ -42,6 +61,34 @@ public sealed class GitHubApiClient : IGitHubApiClient
     // pagination indefinitely.
     private const int RepositoryListPageSize = 100;
     private const int RepositoryListMaxPages = 10;
+
+    // GetOldestOpenIssueAsync (RP-020) input-validation bound: not GitHub's
+    // authoritative owner/repo name limit (that is ~39/~100 characters and
+    // undocumented as a hard contract), just a generous defense-in-depth
+    // ceiling that rejects pathological caller input before it ever reaches
+    // a GraphQL variable or the network.
+    private const int MaxGraphQlIdentifierLength = 200;
+
+    // Static GraphQL query text (RP-020) — owner/name are NEVER interpolated
+    // into this string; they are sent only as GraphQL variables (see
+    // BuildOldestOpenIssueRequestBody), so no caller-supplied value can alter
+    // the query's shape. states: OPEN excludes pull requests by construction
+    // (see the doc comment on IGitHubApiClient.GetOldestOpenIssueAsync for
+    // why this rules out the REST issues endpoint); first: 1 with
+    // orderBy CREATED_AT ASC asks GitHub itself to return only the single
+    // oldest open issue.
+    private const string OldestOpenIssueQuery = """
+        query($owner: String!, $name: String!) {
+          repository(owner: $owner, name: $name) {
+            issues(states: OPEN, first: 1, orderBy: {field: CREATED_AT, direction: ASC}) {
+              totalCount
+              nodes {
+                createdAt
+              }
+            }
+          }
+        }
+        """;
 
     private readonly HttpClient httpClient;
 
@@ -328,6 +375,81 @@ public sealed class GitHubApiClient : IGitHubApiClient
                 return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.RateLimited);
             default:
                 return GitHubCommitCountResult.Failure(GitHubCommitCountFailureKind.Unexpected);
+        }
+    }
+
+    // RP-020: single GraphQL POST for the oldest OPEN issue's creation time.
+    // See IGitHubApiClient.GetOldestOpenIssueAsync's doc comment for why
+    // GraphQL (not REST's /issues) is used. Exactly one HTTP request is
+    // made — no pagination, no retry.
+    public async Task<GitHubOldestOpenIssueResult> GetOldestOpenIssueAsync(
+        string accessToken,
+        string owner,
+        string repository,
+        CancellationToken cancellationToken)
+    {
+        // Resolved before any network call — invalid caller input is never
+        // sent to GitHub. Unexpected is reused rather than adding a new
+        // failure kind, since this is a caller-input problem, not a GitHub
+        // response outcome (no distinct enum value was requested for it).
+        if (string.IsNullOrWhiteSpace(accessToken) ||
+            string.IsNullOrWhiteSpace(owner) || owner.Length > MaxGraphQlIdentifierLength ||
+            string.IsNullOrWhiteSpace(repository) || repository.Length > MaxGraphQlIdentifierLength)
+        {
+            return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+        }
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, OAuthConstants.GraphQlEndpoint);
+        ApplyStandardHeaders(request, accessToken);
+        request.Content = new StringContent(BuildOldestOpenIssueRequestBody(owner, repository), Encoding.UTF8, "application/json");
+
+        string body;
+        HttpStatusCode statusCode;
+        try
+        {
+            using var response = await httpClient.SendAsync(request, cancellationToken);
+            statusCode = response.StatusCode;
+            body = await response.Content.ReadAsStringAsync(cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.NetworkError);
+        }
+        catch (HttpRequestException)
+        {
+            return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.NetworkError);
+        }
+        // See the matching comment in RepoPulseAuthApiClient.ExchangeAsync —
+        // Xamarin.Android's HTTP handler can surface a raw socket failure as
+        // System.Net.WebException instead of HttpRequestException.
+        catch (WebException)
+        {
+            return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.NetworkError);
+        }
+
+        // Status code alone decides the outcome for the transport layer —
+        // GitHub's GraphQL endpoint expresses most domain-level failures
+        // (auth/rate-limit/missing-repository) as HTTP 200 with a structured
+        // `errors`/`data` body instead of a REST-style status code, so only
+        // 401/403/429 are mapped here; every other non-200 status
+        // (including 404, which this endpoint is not documented to return
+        // for a missing repository — that comes back as `data.repository ==
+        // null` inside a 200 instead) is Unexpected, never guessed at.
+        switch (statusCode)
+        {
+            case HttpStatusCode.OK:
+                return ParseOldestOpenIssueResponse(body);
+            case HttpStatusCode.Unauthorized:
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unauthorized);
+            case HttpStatusCode.Forbidden:
+            case (HttpStatusCode)429:
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.RateLimited);
+            default:
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
         }
     }
 
@@ -926,6 +1048,193 @@ public sealed class GitHubApiClient : IGitHubApiClient
         }
 
         return page is not null && sawSince && sawUntil && sawPerPage ? page : null;
+    }
+
+    // Builds the GraphQL POST body via JsonObject rather than string
+    // concatenation — every string value assigned to a JsonObject property
+    // is escaped by ToJsonString(), so owner/repository can never break out
+    // of their variable slot (no quote/backslash/newline injection can alter
+    // the query), and neither value is ever placed inside the query text
+    // itself.
+    private static string BuildOldestOpenIssueRequestBody(string owner, string repository)
+    {
+        var requestBody = new JsonObject
+        {
+            ["query"] = OldestOpenIssueQuery,
+            ["variables"] = new JsonObject
+            {
+                ["owner"] = owner,
+                ["name"] = repository
+            }
+        };
+
+        return requestBody.ToJsonString();
+    }
+
+    // RP-020: interprets a GraphQL POST response body for
+    // repository.issues(states: OPEN, first: 1, orderBy: CREATED_AT ASC).
+    // HTTP 200 alone is never trusted as success — the body's own shape is
+    // fully re-verified. Any shape this does not explicitly recognize
+    // returns Unexpected rather than guessing (fail-closed), and no
+    // pushed_at/updated_at or other fallback timestamp is ever substituted
+    // for a missing/invalid createdAt.
+    private static GitHubOldestOpenIssueResult ParseOldestOpenIssueResponse(string body)
+    {
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(body);
+        }
+        catch (JsonException)
+        {
+            return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+        }
+
+        using (document)
+        {
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+            }
+
+            // A GraphQL `errors` array takes priority over any `data` present
+            // alongside it — fail-closed: a 200 response carrying `errors` is
+            // never treated as a (possibly partial) success, even when
+            // `data` also parses cleanly.
+            if (root.TryGetProperty("errors", out var errorsElement))
+            {
+                return ClassifyGraphQlErrors(errorsElement);
+            }
+
+            if (!root.TryGetProperty("data", out var dataElement) || dataElement.ValueKind != JsonValueKind.Object)
+            {
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+            }
+
+            if (!dataElement.TryGetProperty("repository", out var repositoryElement))
+            {
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+            }
+
+            if (repositoryElement.ValueKind == JsonValueKind.Null)
+            {
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.RepositoryUnavailable);
+            }
+
+            if (repositoryElement.ValueKind != JsonValueKind.Object ||
+                !repositoryElement.TryGetProperty("issues", out var issuesElement) ||
+                issuesElement.ValueKind != JsonValueKind.Object)
+            {
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+            }
+
+            if (!issuesElement.TryGetProperty("totalCount", out var totalCountElement) ||
+                totalCountElement.ValueKind != JsonValueKind.Number ||
+                !totalCountElement.TryGetInt32(out var totalCount) ||
+                totalCount < 0)
+            {
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+            }
+
+            if (!issuesElement.TryGetProperty("nodes", out var nodesElement) || nodesElement.ValueKind != JsonValueKind.Array)
+            {
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+            }
+
+            var nodeCount = nodesElement.GetArrayLength();
+
+            if (totalCount == 0)
+            {
+                // GitHub reporting zero total open issues alongside a
+                // non-empty nodes array would be an internally
+                // contradictory shape — never trusted enough to call
+                // NoOpenIssues.
+                return nodeCount == 0
+                    ? GitHubOldestOpenIssueResult.NoOpenIssues()
+                    : GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+            }
+
+            // totalCount > 0 past this point: first: 1 means exactly one
+            // node is the only trustworthy shape — zero nodes (contradicts a
+            // positive count) or more than one (contradicts the first: 1
+            // page size) are both Unexpected, never silently taking the
+            // first of several.
+            if (nodeCount != 1)
+            {
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+            }
+
+            var node = nodesElement[0];
+            if (node.ValueKind != JsonValueKind.Object ||
+                !node.TryGetProperty("createdAt", out var createdAtElement) ||
+                createdAtElement.ValueKind != JsonValueKind.String)
+            {
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+            }
+
+            var createdAtRaw = createdAtElement.GetString();
+            if (string.IsNullOrEmpty(createdAtRaw) ||
+                !DateTimeOffset.TryParse(createdAtRaw, CultureInfo.InvariantCulture, DateTimeStyles.None, out var createdAt))
+            {
+                return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+            }
+
+            return GitHubOldestOpenIssueResult.Success(createdAt);
+        }
+    }
+
+    // GitHub's documented GraphQL error shape carries a structured "type"
+    // string per error object — RATE_LIMITED for rate-limit errors, and
+    // FORBIDDEN/INSUFFICIENT_SCOPES/UNAUTHORIZED-style codes for
+    // authorization problems. Only this structured "type" field is trusted;
+    // the raw "message" text (which may contain GitHub-generated prose about
+    // the request) is never read, retained, or surfaced to a caller/log/
+    // exception. Any error object without a recognized "type" is folded into
+    // Unexpected — fail-closed rather than guessing at unfamiliar shapes.
+    private static GitHubOldestOpenIssueResult ClassifyGraphQlErrors(JsonElement errorsElement)
+    {
+        if (errorsElement.ValueKind != JsonValueKind.Array || errorsElement.GetArrayLength() == 0)
+        {
+            return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+        }
+
+        var sawRateLimited = false;
+        var sawAuthorization = false;
+
+        foreach (var error in errorsElement.EnumerateArray())
+        {
+            if (error.ValueKind != JsonValueKind.Object ||
+                !error.TryGetProperty("type", out var typeElement) ||
+                typeElement.ValueKind != JsonValueKind.String)
+            {
+                continue;
+            }
+
+            switch (typeElement.GetString())
+            {
+                case "RATE_LIMITED":
+                    sawRateLimited = true;
+                    break;
+                case "FORBIDDEN":
+                case "INSUFFICIENT_SCOPES":
+                case "UNAUTHORIZED":
+                    sawAuthorization = true;
+                    break;
+            }
+        }
+
+        if (sawRateLimited)
+        {
+            return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.RateLimited);
+        }
+
+        if (sawAuthorization)
+        {
+            return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unauthorized);
+        }
+
+        return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
     }
 
     private static GitHubRepositoryResult ParseRepository(string body)

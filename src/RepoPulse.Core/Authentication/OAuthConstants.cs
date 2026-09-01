@@ -29,4 +29,10 @@ public static class OAuthConstants
     public const string RepositoryListHost = "api.github.com";
     public const string RepositoryListPath = "/user/repos";
     public const string RepositoryListEndpoint = "https://" + RepositoryListHost + RepositoryListPath;
+
+    // GitHub's single GraphQL endpoint (RP-020) — used only by
+    // GetOldestOpenIssueAsync's repository.issues query. Every other
+    // GitHubApiClient method talks to a REST endpoint above; this is the
+    // only POST/GraphQL call in the client.
+    public const string GraphQlEndpoint = "https://api.github.com/graphql";
 }
