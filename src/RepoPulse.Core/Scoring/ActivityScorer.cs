@@ -71,6 +71,43 @@ public static class ActivityScorer
     // summing to exactly this denominator.
     private const long PartialWeightDenominator = RecencyWeight + FrequencyWeight;
 
+    // INPUT CONSISTENCY CONTRACT (documents a limitation; changes no behavior
+    // and adds no runtime check). Score is a pure composition function, not an
+    // orchestration layer: it makes no GitHub API call of its own and has no
+    // way to verify that recencyScore/frequencyScore/trendScore describe the
+    // same underlying repository state. GitHub's separate REST endpoints
+    // (latest commit; 30-day count; 90-day count) offer no transactional or
+    // atomic multi-endpoint snapshot guarantee — a push, force-push, rebase,
+    // or ordinary propagation delay between the calls that produced these
+    // three inputs can leave each one individually valid while together
+    // describing different moments of the same repository. For example:
+    // Recency=NoCommits paired with Frequency=Low/Moderate/High, or
+    // Recency=Fresh/Recent paired with Frequency=Inactive.
+    //
+    // PRECONDITION (v0.1.0): the caller — a future analysis-orchestration
+    // layer, explicitly out of RP-019's scope — is responsible for producing
+    // these three inputs from one analysis run: capturing a single
+    // analysisTimestampUtc, using that same untilUtc for RP-016's 30/90-day
+    // counts (already required by CommitFrequencyTrendScorer), gathering the
+    // recency/latest-commit read as close to that same run as practical, and
+    // confirming all three results belong to the same repository/default-
+    // branch identity. Aligning inputs to one analysis run REDUCES the chance
+    // of a cross-component contradiction; it does NOT guarantee full
+    // consistency — GitHub's endpoints remain independent, non-transactional
+    // calls, and a contradiction can still occur even within one run.
+    //
+    // This method does not detect or reject cross-component contradictions:
+    // given three individually-valid inputs it always composes them into
+    // Full or PartialTrend* — it never emits a result for cross-component
+    // disagreement (PartialTrendInconsistent is unrelated: it is Trend's own
+    // internal 30-vs-90 disagreement, see CommitFrequencyTrendScorer, not a
+    // disagreement between Recency/Frequency/Trend). Detecting contradictions
+    // such as NoCommits-recency-with-non-zero-frequency or Fresh/Recent-
+    // recency-with-Inactive-frequency, and deciding how to respond — at most
+    // a bounded, safe re-fetch, with any persisting contradiction surfaced as
+    // a typed Inconsistent/NoData analysis result rather than silently
+    // producing a Full score — is deferred to that future orchestration layer
+    // and is out of scope here.
     public static ActivityScore Score(
         ActivityRecencyScore? recencyScore,
         CommitFrequencyScore frequencyScore,
