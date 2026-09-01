@@ -475,6 +475,42 @@ public class ActivityScorerTests
         Assert.Equal("0.1.0", result.AlgorithmVersion);
     }
 
+    // 41a. ComponentId is exactly "activity" (RP-019 metadata; matches the
+    // ComponentId pattern already used by CommitFrequencyScorer and
+    // CommitFrequencyTrendScorer — added after the PR #21 pre-merge audit
+    // found ActivityScorer was the only RP-019-touched scorer missing it).
+    [Fact]
+    public void ComponentId_IsExactlyActivity()
+    {
+        Assert.Equal("activity", ActivityScorer.ComponentId);
+    }
+
+    // 41b. ComponentId is a compile-time constant (const string field) — not
+    // a caller-settable static property, so there is no way to fabricate a
+    // different component id at runtime.
+    [Fact]
+    public void ComponentId_IsConstStaticStringField()
+    {
+        var field = typeof(ActivityScorer).GetField(nameof(ActivityScorer.ComponentId), BindingFlags.Public | BindingFlags.Static)!;
+
+        Assert.Equal(typeof(string), field.FieldType);
+        Assert.True(field.IsLiteral);
+    }
+
+    // 41c. ActivityScore itself carries no ComponentId property — the
+    // identifier lives solely on ActivityScorer, exactly like AlgorithmVersion
+    // does (ActivityScore.AlgorithmVersion is copied FROM
+    // ActivityScorer.AlgorithmVersion inside the private constructor), but no
+    // such copy, constructor parameter, or factory parameter exists for
+    // ComponentId.
+    [Fact]
+    public void ActivityScore_HasNoComponentIdProperty()
+    {
+        var properties = typeof(ActivityScore).GetProperties(BindingFlags.Public | BindingFlags.Instance);
+
+        Assert.DoesNotContain(properties, p => p.Name == "ComponentId");
+    }
+
     // ===================== Overflow/determinism (42-46) =====================
 
     // 42. All weight constants used in the arithmetic are long, not int.

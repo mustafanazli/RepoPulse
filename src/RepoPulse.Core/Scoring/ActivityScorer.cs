@@ -37,15 +37,20 @@ namespace RepoPulse.Core.Scoring;
 public static class ActivityScorer
 {
     // Component/algorithm identity — see RepoPulse-Project-Plan.md's
-    // algorithm-versioning rules (§6). Bump this if the weights, the
-    // completeness/reweighting policy, the rounding rule, or the band
-    // boundaries below ever change — existing stored Activity results must
-    // never be silently reinterpreted under a new policy. This version is
-    // independent of RecencyAlgorithmVersion/FrequencyAlgorithmVersion/
-    // TrendAlgorithmVersion (carried on the result) — if any of those three
-    // sub-algorithms changes, this composition's correctness against the new
-    // sub-algorithm should be re-reviewed, but the version numbers are not
-    // coupled to each other.
+    // algorithm-versioning rules (§6), and matches the ComponentId pattern
+    // already used by CommitFrequencyScorer/CommitFrequencyTrendScorer.
+    // Metadata only — Score never reads this constant, and no factory or
+    // result property accepts/carries it.
+    public const string ComponentId = "activity";
+
+    // Bump this if the weights, the completeness/reweighting policy, the
+    // rounding rule, or the band boundaries below ever change — existing
+    // stored Activity results must never be silently reinterpreted under a
+    // new policy. This version is independent of RecencyAlgorithmVersion/
+    // FrequencyAlgorithmVersion/TrendAlgorithmVersion (carried on the
+    // result) — if any of those three sub-algorithms changes, this
+    // composition's correctness against the new sub-algorithm should be
+    // re-reviewed, but the version numbers are not coupled to each other.
     public const string AlgorithmVersion = "0.1.0";
 
     // Recency is weighted highest: it is the single most direct "is this
