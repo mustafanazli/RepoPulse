@@ -226,6 +226,52 @@ public class GitHubOldestOpenIssueQueryTests
         var resultOffset = await clientOffset.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
 
         Assert.Equal(resultUtc.CreatedAtUtc, resultOffset.CreatedAtUtc);
+        // Instant-equality alone (DateTimeOffset.Equals) does not prove
+        // normalization — a +02:00 value and a Z value represent the same
+        // instant even without ever being converted. Both offsets must
+        // independently be verified as exactly zero.
+        Assert.Equal(TimeSpan.Zero, resultUtc.CreatedAtUtc!.Value.Offset);
+        Assert.Equal(TimeSpan.Zero, resultOffset.CreatedAtUtc!.Value.Offset);
+    }
+
+    // ===================== B2. UTC normalization =====================
+
+    [Fact]
+    public async Task PositiveOffsetCreatedAt_NormalizesInstantAndOffsetToUtc()
+    {
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, SuccessBody("2026-08-30T15:00:00+03:00")));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(new DateTimeOffset(2026, 8, 30, 12, 0, 0, TimeSpan.Zero), result.CreatedAtUtc);
+        Assert.Equal(TimeSpan.Zero, result.CreatedAtUtc!.Value.Offset);
+    }
+
+    [Fact]
+    public async Task NegativeOffsetCreatedAt_NormalizesInstantAndOffsetToUtc()
+    {
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, SuccessBody("2026-08-30T05:00:00-05:00")));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(new DateTimeOffset(2026, 8, 30, 10, 0, 0, TimeSpan.Zero), result.CreatedAtUtc);
+        Assert.Equal(TimeSpan.Zero, result.CreatedAtUtc!.Value.Offset);
+    }
+
+    [Fact]
+    public async Task ZSuffixCreatedAt_OffsetIsZero()
+    {
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, SuccessBody("2026-08-30T12:00:00Z")));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(TimeSpan.Zero, result.CreatedAtUtc!.Value.Offset);
     }
 
     // ===================== C. No open issues =====================
@@ -282,6 +328,7 @@ public class GitHubOldestOpenIssueQueryTests
 
         Assert.False(result.IsSuccess);
         Assert.Equal(GitHubOldestOpenIssueFailureKind.Unauthorized, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
     }
 
     [Fact]
@@ -294,6 +341,7 @@ public class GitHubOldestOpenIssueQueryTests
 
         Assert.False(result.IsSuccess);
         Assert.Equal(GitHubOldestOpenIssueFailureKind.RateLimited, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
     }
 
     [Fact]
@@ -306,6 +354,7 @@ public class GitHubOldestOpenIssueQueryTests
 
         Assert.False(result.IsSuccess);
         Assert.Equal(GitHubOldestOpenIssueFailureKind.RateLimited, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
     }
 
     [Fact]
@@ -322,54 +371,70 @@ public class GitHubOldestOpenIssueQueryTests
 
         Assert.False(result.IsSuccess);
         Assert.Equal(GitHubOldestOpenIssueFailureKind.Unexpected, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
     }
 
+    // Uses FakeHttpMessageHandler (not ThrowingHttpMessageHandler) with a
+    // throwing responder — FakeHttpMessageHandler records the request into
+    // Requests/RequestCount BEFORE invoking the responder, so RequestCount
+    // is observable even when the responder itself throws. This proves
+    // exactly one request was attempted, not zero and not a retry.
     [Fact]
     public async Task HttpRequestException_ReturnsNetworkError()
     {
-        var handler = new ThrowingHttpMessageHandler(new HttpRequestException("simulated failure"));
+        var handler = new FakeHttpMessageHandler(_ => throw new HttpRequestException("simulated failure"));
         var client = MakeClient(handler);
 
         var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
 
         Assert.False(result.IsSuccess);
         Assert.Equal(GitHubOldestOpenIssueFailureKind.NetworkError, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
     }
 
     [Fact]
     public async Task WebException_ReturnsNetworkError()
     {
-        var handler = new ThrowingHttpMessageHandler(new WebException("Socket closed"));
+        var handler = new FakeHttpMessageHandler(_ => throw new WebException("Socket closed"));
         var client = MakeClient(handler);
 
         var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
 
         Assert.False(result.IsSuccess);
         Assert.Equal(GitHubOldestOpenIssueFailureKind.NetworkError, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
     }
 
     [Fact]
     public async Task Timeout_ReturnsNetworkError()
     {
-        var handler = new ThrowingHttpMessageHandler(new TaskCanceledException("simulated timeout"));
+        var handler = new FakeHttpMessageHandler(_ => throw new TaskCanceledException("simulated timeout"));
         var client = MakeClient(handler);
 
         var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
 
         Assert.False(result.IsSuccess);
         Assert.Equal(GitHubOldestOpenIssueFailureKind.NetworkError, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
     }
 
     [Fact]
     public async Task CallersOwnTokenCancelled_RethrowsRatherThanSwallowing()
     {
-        var handler = new ThrowingHttpMessageHandler(new OperationCanceledException("simulated own-token timeout"));
+        var handler = new FakeHttpMessageHandler(_ => throw new OperationCanceledException("simulated own-token timeout"));
         var client = MakeClient(handler);
         using var cts = new CancellationTokenSource();
         cts.Cancel();
 
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
             () => client.GetOldestOpenIssueAsync(Token, Owner, Repository, cts.Token));
+
+        // Deterministic RequestCount for this scenario, empirically pinned:
+        // HttpClient does NOT short-circuit on an already-cancelled caller
+        // token before dispatching to the handler — SendAsync still runs
+        // (and throws), so exactly one request attempt is recorded, not
+        // zero and not a retry.
+        Assert.Equal(1, handler.RequestCount);
     }
 
     // ===================== F. GraphQL errors =====================
@@ -436,6 +501,105 @@ public class GitHubOldestOpenIssueQueryTests
         Assert.False(result.IsSuccess);
         Assert.Equal(GitHubOldestOpenIssueFailureKind.RateLimited, result.FailureKind);
         Assert.Null(result.CreatedAtUtc);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    // ===================== F2. Empty/non-array errors =====================
+    //
+    // An `errors` property that is syntactically present but carries no
+    // actual error (an empty array) must not block otherwise-valid `data`
+    // from being processed — this is the RP-020 hardening fix: previously,
+    // ANY presence of the `errors` key (even `[]`) short-circuited straight
+    // to Unexpected before `data` was ever read.
+
+    [Fact]
+    public async Task EmptyErrorsArrayWithValidIssueData_ReturnsSuccess()
+    {
+        var body = """{"errors":[],"data":{"repository":{"issues":{"totalCount":1,"nodes":[{"createdAt":"2025-06-01T00:00:00Z"}]}}}}""";
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, body));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(new DateTimeOffset(2025, 6, 1, 0, 0, 0, TimeSpan.Zero), result.CreatedAtUtc);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task EmptyErrorsArrayWithNoOpenIssuesData_ReturnsNoOpenIssues()
+    {
+        var body = """{"errors":[],"data":{"repository":{"issues":{"totalCount":0,"nodes":[]}}}}""";
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, body));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.False(result.HasOpenIssues);
+        Assert.Null(result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task EmptyErrorsArrayWithRepositoryNull_ReturnsRepositoryUnavailable()
+    {
+        var body = """{"errors":[],"data":{"repository":null}}""";
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, body));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubOldestOpenIssueFailureKind.RepositoryUnavailable, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task EmptyErrorsArrayWithMalformedData_ReturnsUnexpected()
+    {
+        var body = """{"errors":[],"data":{"repository":{"issues":{"totalCount":1,"nodes":[]}}}}""";
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, body));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubOldestOpenIssueFailureKind.Unexpected, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task NullErrorsWithValidData_ReturnsUnexpected()
+    {
+        var body = """{"errors":null,"data":{"repository":{"issues":{"totalCount":1,"nodes":[{"createdAt":"2025-06-01T00:00:00Z"}]}}}}""";
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, body));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubOldestOpenIssueFailureKind.Unexpected, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Theory]
+    [InlineData("{}")]
+    [InlineData("42")]
+    [InlineData("true")]
+    [InlineData("\"a string\"")]
+    public async Task NonArrayErrorsShapeWithValidData_ReturnsUnexpected(string errorsValueJson)
+    {
+        var body = "{\"errors\":" + errorsValueJson +
+            ",\"data\":{\"repository\":{\"issues\":{\"totalCount\":1,\"nodes\":[{\"createdAt\":\"2025-06-01T00:00:00Z\"}]}}}}";
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, body));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubOldestOpenIssueFailureKind.Unexpected, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
     }
 
     // ===================== G. Response shape =====================
@@ -487,6 +651,87 @@ public class GitHubOldestOpenIssueQueryTests
         Assert.Equal(GitHubOldestOpenIssueFailureKind.Unexpected, result.FailureKind);
         Assert.Equal(1, handler.RequestCount);
         _ = scenario; // documents intent in the test explorer; not asserted on
+    }
+
+    // ===================== G2. totalCount boundary =====================
+
+    [Fact]
+    public async Task TotalCountAtInt32MaxValue_WithSingleValidNode_ReturnsSuccess()
+    {
+        // int.MaxValue is shape-valid — a plain JSON integer that fits in
+        // Int32 — and GraphQL's own first:1 page size still guarantees at
+        // most one node, so Success semantics must not break just because
+        // totalCount is enormous.
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, SuccessBody("2025-06-01T00:00:00Z", totalCount: int.MaxValue)));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(new DateTimeOffset(2025, 6, 1, 0, 0, 0, TimeSpan.Zero), result.CreatedAtUtc);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task TotalCountOneMoreThanInt32MaxValue_ReturnsUnexpected()
+    {
+        // 2147483648 does not fit in Int32 — JsonElement.TryGetInt32 must
+        // fail, and the parser must not silently truncate/wrap it.
+        var body = """{"data":{"repository":{"issues":{"totalCount":2147483648,"nodes":[{"createdAt":"2025-06-01T00:00:00Z"}]}}}}""";
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, body));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubOldestOpenIssueFailureKind.Unexpected, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task TotalCountFarExceedingJsonIntegerRange_ReturnsUnexpected()
+    {
+        var body = """{"data":{"repository":{"issues":{"totalCount":99999999999999999999999999999,"nodes":[{"createdAt":"2025-06-01T00:00:00Z"}]}}}}""";
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, body));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubOldestOpenIssueFailureKind.Unexpected, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task FractionalTotalCount_ReturnsUnexpected()
+    {
+        var body = """{"data":{"repository":{"issues":{"totalCount":1.5,"nodes":[{"createdAt":"2025-06-01T00:00:00Z"}]}}}}""";
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, body));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubOldestOpenIssueFailureKind.Unexpected, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
+    }
+
+    [Fact]
+    public async Task NegativeTotalCount_ReturnsUnexpected()
+    {
+        // Regression pin for the existing negative-totalCount case already
+        // covered by MalformedResponseBodies — kept here as its own
+        // dedicated, explicitly-named test per the totalCount boundary
+        // requirement, with the same RequestCount assertion.
+        var body = """{"data":{"repository":{"issues":{"totalCount":-1,"nodes":[]}}}}""";
+        var handler = new FakeHttpMessageHandler(_ => JsonResponse(HttpStatusCode.OK, body));
+        var client = MakeClient(handler);
+
+        var result = await client.GetOldestOpenIssueAsync(Token, Owner, Repository, CancellationToken.None);
+
+        Assert.False(result.IsSuccess);
+        Assert.Equal(GitHubOldestOpenIssueFailureKind.Unexpected, result.FailureKind);
+        Assert.Equal(1, handler.RequestCount);
     }
 
     // ===================== Input validation (no network call) =====================
@@ -568,6 +813,27 @@ public class GitHubOldestOpenIssueQueryTests
         Assert.True(result.HasOpenIssues);
         Assert.NotNull(result.CreatedAtUtc);
         Assert.Null(result.FailureKind);
+        Assert.Equal(TimeSpan.Zero, result.CreatedAtUtc!.Value.Offset);
+    }
+
+    // The invariant is enforced by the factory itself, not merely by the one
+    // current caller (GitHubApiClient's parser) happening to always pass a
+    // UTC value — this proves it holds even when called directly with a
+    // non-UTC DateTimeOffset, which is the only way any caller (in this
+    // assembly or elsewhere) could ever construct a GitHubOldestOpenIssueResult.
+    [Theory]
+    [InlineData(3)]
+    [InlineData(-5)]
+    [InlineData(9)]
+    [InlineData(-11)]
+    public void SuccessFactory_NormalizesAnyOffsetToUtc(int offsetHours)
+    {
+        var nonUtcValue = new DateTimeOffset(2026, 8, 30, 12, 0, 0, TimeSpan.FromHours(offsetHours));
+
+        var result = GitHubOldestOpenIssueResult.Success(nonUtcValue);
+
+        Assert.Equal(TimeSpan.Zero, result.CreatedAtUtc!.Value.Offset);
+        Assert.Equal(nonUtcValue.ToUniversalTime(), result.CreatedAtUtc);
     }
 
     [Fact]

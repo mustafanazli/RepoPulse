@@ -49,7 +49,14 @@ public sealed class GitHubOldestOpenIssueResult
         FailureKind = failureKind;
     }
 
-    public static GitHubOldestOpenIssueResult Success(DateTimeOffset createdAtUtc) => new(true, true, createdAtUtc, null);
+    // Normalizes to UTC here — the one place this invariant is enforced —
+    // so no caller, in this assembly or any other, can ever construct a
+    // "successful" result whose CreatedAtUtc carries a non-zero offset. The
+    // caller-supplied value is NOT assumed to already be UTC (a parsed
+    // GraphQL timestamp may carry any offset); the instant is preserved
+    // exactly, only the offset representation changes (e.g.
+    // 2026-08-30T15:00:00+03:00 becomes 2026-08-30T12:00:00+00:00).
+    public static GitHubOldestOpenIssueResult Success(DateTimeOffset createdAtUtc) => new(true, true, createdAtUtc.ToUniversalTime(), null);
 
     public static GitHubOldestOpenIssueResult NoOpenIssues() => new(true, false, null, null);
 

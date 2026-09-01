@@ -1098,13 +1098,28 @@ public sealed class GitHubApiClient : IGitHubApiClient
                 return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
             }
 
-            // A GraphQL `errors` array takes priority over any `data` present
-            // alongside it — fail-closed: a 200 response carrying `errors` is
-            // never treated as a (possibly partial) success, even when
-            // `data` also parses cleanly.
+            // A non-empty GraphQL `errors` array takes priority over any
+            // `data` present alongside it — fail-closed: a 200 response
+            // carrying at least one real error is never treated as a
+            // (possibly partial) success, even when `data` also parses
+            // cleanly. An `errors` property that is present but an EMPTY
+            // array carries no actual error (the GraphQL spec never expects
+            // a compliant server to send one, but a defensive reader must
+            // not treat its mere presence as a failure signal either) — data
+            // parsing continues below exactly as if `errors` were absent.
+            // Any other shape for `errors` (null, an object, a string, a
+            // number, a boolean) is untrusted and Unexpected.
             if (root.TryGetProperty("errors", out var errorsElement))
             {
-                return ClassifyGraphQlErrors(errorsElement);
+                if (errorsElement.ValueKind != JsonValueKind.Array)
+                {
+                    return GitHubOldestOpenIssueResult.Failure(GitHubOldestOpenIssueFailureKind.Unexpected);
+                }
+
+                if (errorsElement.GetArrayLength() > 0)
+                {
+                    return ClassifyGraphQlErrors(errorsElement);
+                }
             }
 
             if (!root.TryGetProperty("data", out var dataElement) || dataElement.ValueKind != JsonValueKind.Object)
