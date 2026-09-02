@@ -60,3 +60,6 @@ appsettings.*.local.json
 # infra/azure/app.example.bicepparam (Phase B).
 infra/azure/main.bicepparam
 infra/azure/app.bicepparam
+
+# Local planning document — kept on disk for reference, not tracked.
+/RepoPulse-Project-Plan.md
