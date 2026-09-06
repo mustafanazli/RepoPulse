@@ -1019,6 +1019,169 @@ public sealed class OldestOpenIssueAnalyzerTests
     }
 
     // ---------------------------------------------------------------
+    // K. Access token contract: null vs. empty/whitespace
+    // ---------------------------------------------------------------
+
+    // 69-74. A normal repository with an empty or whitespace token, driven
+    // through the REAL GitHubApiClient rather than a fake, so that one test
+    // proves the whole delegation chain at once: the analyzer does not
+    // duplicate token validation, GitHubApiClient rejects the token before
+    // opening a connection, the mapper turns that typed failure into
+    // NoData, the scorer scores NoData/null, and the analyzer reports
+    // Failed. The FakeHttpMessageHandler's request count proves no HTTP
+    // request left the process — it is wired to throw if it is ever asked
+    // for a response.
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("   ")]
+    [InlineData("\t")]
+    [InlineData("\r\n")]
+    [InlineData(" \t\r\n ")]
+    public async Task EmptyOrWhitespaceToken_NormalRepository_FailsWithoutAnyHttpRequest(string accessToken)
+    {
+        var handler = new FakeHttpMessageHandler(_ =>
+            throw new InvalidOperationException("No HTTP request may be made for an empty or whitespace token."));
+        var analyzer = new OldestOpenIssueAnalyzer(new GitHubApiClient(new HttpClient(handler)));
+
+        var result = await analyzer.AnalyzeAsync(accessToken, NormalRepository(), AnalysisAt, CancellationToken.None);
+
+        Assert.Equal(AnalysisSignalStatus.Failed, result.Status);
+        Assert.Equal(OldestOpenIssueAgeBand.NoData, result.Score.Band);
+        Assert.Null(result.Score.Value);
+        Assert.Equal(AnalysisAt, result.AnalysisTimestampUtc);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    // 75. The delegation is real rather than incidental: the same empty
+    // token produces exactly the failure GitHubApiClient itself produces
+    // for this endpoint, mapped and scored by the real chain.
+    [Fact]
+    public async Task EmptyToken_ProducesTheSameOutcomeAsTheClientContract()
+    {
+        var handler = new FakeHttpMessageHandler(_ =>
+            throw new InvalidOperationException("No HTTP request may be made for an empty token."));
+        var client = new GitHubApiClient(new HttpClient(handler));
+
+        var apiResult = await client.GetOldestOpenIssueAsync("", Owner, Name, CancellationToken.None);
+        var expectedScore = OldestOpenIssueAgeScorer.Score(
+            OldestOpenIssueObservationMapper.Map(apiResult), AnalysisAt, isArchived: false, isFork: false);
+
+        var result = await new OldestOpenIssueAnalyzer(client)
+            .AnalyzeAsync("", NormalRepository(), AnalysisAt, CancellationToken.None);
+
+        Assert.False(apiResult.IsSuccess);
+        Assert.Equal(expectedScore, result.Score);
+        Assert.Equal(AnalysisSignalStatus.Failed, result.Status);
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    // 76-80. An archived or fork repository skips the request entirely, so
+    // an empty or whitespace token does NOT turn the run into a failure —
+    // it still reports NotApplicableSkipped. This is safe rather than a
+    // loophole: applicability is decided from repository metadata the
+    // caller already holds, so the result asserts nothing about GitHub-side
+    // data and needs no authenticated answer.
+    [Theory]
+    [InlineData(true, false, "")]
+    [InlineData(true, false, "   ")]
+    [InlineData(false, true, "")]
+    [InlineData(false, true, "\t")]
+    [InlineData(true, true, " \r\n ")]
+    public async Task EmptyOrWhitespaceToken_ArchivedOrFork_StillSkipsWithoutCallingClient(bool isArchived, bool isFork, string accessToken)
+    {
+        var counting = FakeGitHubApiClient.Returning(GitHubOldestOpenIssueResult.NoOpenIssues());
+
+        var counted = await new OldestOpenIssueAnalyzer(counting).AnalyzeAsync(
+            accessToken,
+            RepositoryAnalysisContext.Create(Owner, Name, isArchived, isFork),
+            AnalysisAt,
+            CancellationToken.None);
+
+        // Repeated against a client that throws on every member, so the
+        // zero above cannot be a counting mistake.
+        var exploding = await new OldestOpenIssueAnalyzer(new ExplodingGitHubApiClient()).AnalyzeAsync(
+            accessToken,
+            RepositoryAnalysisContext.Create(Owner, Name, isArchived, isFork),
+            AnalysisAt,
+            CancellationToken.None);
+
+        foreach (var result in new[] { counted, exploding })
+        {
+            Assert.Equal(AnalysisSignalStatus.NotApplicableSkipped, result.Status);
+            Assert.Equal(OldestOpenIssueAgeBand.NotApplicable, result.Score.Band);
+            Assert.Null(result.Score.Value);
+            Assert.Equal(AnalysisAt, result.AnalysisTimestampUtc);
+        }
+
+        Assert.Equal(0, counting.OldestOpenIssueCallCount);
+    }
+
+    // 81-83. A null token is a caller error on every repository shape, and
+    // it is rejected before the client is ever consulted.
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task NullToken_ThrowsOnEveryRepositoryShape_WithoutCallingClient(bool isArchived, bool isFork)
+    {
+        var client = FakeGitHubApiClient.Returning(GitHubOldestOpenIssueResult.NoOpenIssues());
+
+        var exception = await Assert.ThrowsAsync<ArgumentNullException>(
+            () => new OldestOpenIssueAnalyzer(client).AnalyzeAsync(
+                null!,
+                RepositoryAnalysisContext.Create(Owner, Name, isArchived, isFork),
+                AnalysisAt,
+                CancellationToken.None));
+
+        Assert.Equal("accessToken", exception.ParamName);
+        Assert.Equal(0, client.OldestOpenIssueCallCount);
+    }
+
+    // 84. Cancellation outranks the empty-token path too: a pre-cancelled
+    // run on a normal repository throws instead of reporting Failed, and
+    // no HTTP request is attempted.
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    public async Task PreCancelledToken_NormalRepositoryWithEmptyToken_ThrowsWithoutHttpRequest(string accessToken)
+    {
+        var handler = new FakeHttpMessageHandler(_ =>
+            throw new InvalidOperationException("No HTTP request may be made on a cancelled run."));
+        var analyzer = new OldestOpenIssueAnalyzer(new GitHubApiClient(new HttpClient(handler)));
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => analyzer.AnalyzeAsync(accessToken, NormalRepository(), AnalysisAt, cts.Token));
+
+        Assert.Equal(0, handler.RequestCount);
+    }
+
+    // 85-86. And on the archived/fork path, where an empty token would
+    // otherwise have produced NotApplicableSkipped: cancellation still
+    // wins, with no client call.
+    [Theory]
+    [InlineData(true, false, "")]
+    [InlineData(false, true, "   ")]
+    public async Task PreCancelledToken_ArchivedOrForkWithEmptyToken_ThrowsWithoutCallingClient(bool isArchived, bool isFork, string accessToken)
+    {
+        var client = FakeGitHubApiClient.Returning(GitHubOldestOpenIssueResult.NoOpenIssues());
+        var analyzer = new OldestOpenIssueAnalyzer(client);
+        using var cts = new CancellationTokenSource();
+        await cts.CancelAsync();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => analyzer.AnalyzeAsync(
+                accessToken,
+                RepositoryAnalysisContext.Create(Owner, Name, isArchived, isFork),
+                AnalysisAt,
+                cts.Token));
+
+        Assert.Equal(0, client.OldestOpenIssueCallCount);
+    }
+
+    // ---------------------------------------------------------------
     // Helpers
     // ---------------------------------------------------------------
 

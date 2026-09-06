@@ -64,6 +64,35 @@ public sealed class OldestOpenIssueAnalyzer
         this.gitHubApiClient = gitHubApiClient;
     }
 
+    // ACCESS TOKEN CONTRACT
+    //
+    //   - A NULL token is a caller/programming error, not a runtime
+    //     outcome, and always throws ArgumentNullException — whatever the
+    //     repository looks like. The applicability short-circuit below
+    //     never masks it, because the guard runs first.
+    //
+    //   - An EMPTY or WHITESPACE token is NOT validated here. That rule
+    //     belongs to GitHubApiClient, which already rejects it for this
+    //     endpoint before opening a connection and returns a typed
+    //     failure; duplicating the check would create a second, drifting
+    //     copy of the same policy. For a normal repository the run
+    //     therefore ends as a failure with no network request made at all.
+    //
+    //   - For an ARCHIVED or FORK repository no request is made in the
+    //     first place, so an empty or whitespace token does not prevent
+    //     the NotApplicableSkipped result. This is deliberate and safe:
+    //     applicability is decided purely from repository metadata the
+    //     caller already holds, so that result asserts nothing about
+    //     GitHub-side data and requires no authenticated answer. An empty
+    //     token is consequently NOT a guarantee of failure — this path is
+    //     the exception.
+    //
+    //   - Cancellation outranks both: an already-cancelled run throws
+    //     rather than producing any result, even on the archived/fork
+    //     path and even with an empty token.
+    //
+    //   - The token is used for this one call and is never stored in a
+    //     field, cached or logged.
     public async Task<OldestOpenIssueAnalysisResult> AnalyzeAsync(
         string accessToken,
         RepositoryAnalysisContext repository,
